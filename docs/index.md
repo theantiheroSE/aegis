@@ -1,3 +1,10 @@
+---
+layout: default
+title: vps-backup
+description: Node.js backup tool for a single VPS — snapshots PM2, PostgreSQL, SQLite, nginx into .tar.zst, uploads via SSH/FTP, prunes old archives, notifies on success/failure.
+theme: jekyll-theme-cayman
+---
+
 # vps-backup
 
 > Node.js backup tool for a single VPS — snapshots PM2 projects, PostgreSQL, SQLite, and nginx into one dated `.tar.zst` archive, uploads to your backup server over SSH or FTP, prunes old archives, and notifies you on success/failure.

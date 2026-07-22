@@ -1,0 +1,121 @@
+{
+  "transfer": "ssh",
+
+  "ssh": {
+    "host": "backup.example.com",
+    "port": 22,
+    "user": "backup",
+    "identityFile": "/root/.ssh/id_ed25519",
+    "remoteDir": "/backups/vps"
+  },
+
+  "ftp": {
+    "host": "ftp.example.com",
+    "port": 21,
+    "user": "backup",
+    "password": "change-me",
+    "remoteDir": "/backups/vps",
+    "secure": false
+  },
+
+  "localStagingDir": "/var/backups/vps/staging",
+  "localArchiveDir": "/var/backups/vps/archive",
+
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  },
+  "retentionDays": 7,
+  "retentionKeepLast": 0,
+
+  "notifications": {
+    "onSuccess": false,
+    "onFailure": true,
+    "webhook": {
+      "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+      "method": "POST",
+      "headers": { "Content-Type": "application/json" }
+    },
+    "email": {
+      "to": "ops@example.com",
+      "from": "vps-backup@example.com"
+    },
+    "smtp": {
+      "host": "smtp.gmail.com",
+      "port": 587,
+      "secure": false,
+      "user": "user@gmail.com",
+      "pass": "app-password",
+      "from": "user@gmail.com",
+      "to": "ops@example.com"
+    }
+  },
+
+  "postgres": {
+    "enabled": true,
+    "host": "/var/run/postgresql",
+    "port": 5432,
+    "user": "postgres",
+    "runAs": "postgres",
+    "bin": "pg_dump",
+    "excludeDatabases": ["template0", "template1"],
+    "excludeOwners": []
+  },
+
+  "sqlite": {
+    "enabled": true,
+    "searchPaths": ["/var/www", "/root", "/opt"],
+    "maxDepth": 6,
+    "patterns": ["*.db", "*.sqlite", "*.sqlite3"],
+    "excludePaths": [
+      "/root/.local/share/opencode",
+      "/root/.pm2",
+      "/root/.cache",
+      "/root/.npm",
+      "/var/www/html",
+      "/var/www/node_modules"
+    ]
+  },
+
+  "pm2": {
+    "enabled": true,
+    "excludeDirs": [
+      "node_modules",
+      ".git",
+      ".next",
+      ".nuxt",
+      "dist",
+      "build",
+      ".cache",
+      ".turbo",
+      "coverage",
+      ".pnpm-store",
+      "logs",
+      "*.log"
+    ]
+  },
+
+  "nginx": {
+    "enabled": true,
+    "sitesAvailable": "/etc/nginx/sites-available",
+    "sitesEnabled": "/etc/nginx/sites-enabled",
+    "confDir": "/etc/nginx/conf.d",
+    "mainConfig": "/etc/nginx/nginx.conf"
+  },
+
+  "extraPaths": [
+    "/etc/letsencrypt",
+    "/root/config"
+  ],
+
+  "archive": {
+    "compression": "zstd",
+    "compressionLevel": 3
+  },
+
+  "logging": {
+    "dir": "/root/bluecode/tools/backup/logs",
+    "keepDays": 30
+  }
+}

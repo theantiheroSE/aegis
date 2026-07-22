@@ -1,0 +1,31 @@
+{
+  "name": "vps-backup",
+  "version": "1.2.0",
+  "description": "VPS backup tool with TUI — backs up Postgres, SQLite, PM2 projects, nginx configs over SSH.",
+  "type": "module",
+  "main": "tui.mjs",
+  "bin": {
+    "vps-backup": "./tui.mjs"
+  },
+  "scripts": {
+    "start": "node tui.mjs",
+    "backup": "node backup.mjs",
+    "restore": "node restore.mjs",
+    "test": "node test-bus.mjs"
+  },
+  "keywords": [
+    "backup",
+    "vps",
+    "postgres",
+    "sqlite",
+    "pm2",
+    "tui",
+    "blessed"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "neo-blessed": "^0.2.0",
+    "nodemailer": "^9.0.3"
+  }
+}

@@ -26,6 +26,8 @@ function parseArgs(argv) {
     yes: false,
     from: null,
     to: null,
+    mapRoot: [],
+    bootstrap: false,
   };
   for (let i = 2; i < argv.length; i++) {
     let a = argv[i];
@@ -38,6 +40,12 @@ function parseArgs(argv) {
     else if (a === "--download-only") { opts.downloadOnly = true; opts.archive = val ?? argv[++i]; }
     else if (a === "--from") { opts.from = val ?? argv[++i]; }
     else if (a === "--to") { opts.to = val ?? argv[++i]; }
+    else if (a === "--map-root") {
+      const v = val ?? argv[++i];
+      if (!v || !v.includes(":")) throw new Error("--map-root expects OLD:NEW (can be repeated)");
+      opts.mapRoot.push(v);
+    }
+    else if (a === "--bootstrap") opts.bootstrap = true;
     else if (a === "--yes" || a === "-y") opts.yes = true;
     else if (a === "-h" || a === "--help") opts.help = true;
     else throw new Error(`Unknown arg: ${a}`);
@@ -58,12 +66,28 @@ function printHelp() {
   console.log(`restore.mjs — restore from a Aegis archive.
 
 Usage:
-  node restore.mjs [--config path] [--archive <name>] [--from <date>] [--to <date>] [--list] [--download-only <name>] [--yes]
+  node restore.mjs [--config path] [--archive <name>] [--from <date>] [--to <date>]
+                  [--list] [--download-only <name>] [--yes]
+                  [--map-root OLD:NEW]... [--bootstrap]
 
 Date filtering:
   --from <ISO date>   Pick the most recent archive whose timestamp is
                       at or before this date (e.g. 2024-12-31 or 2024-12-31T08:00:00Z).
   --to   <ISO date>   Lower bound: only archives AFTER this date.
+
+Cross-host restore:
+  --map-root OLD:NEW  Rewrite paths in the manifest that start with OLD
+                      to start with NEW. Can be repeated for multiple
+                      mappings. Applied to sqlite.source, pm2.cwd/script,
+                      and extras.path. Useful when restoring on a host
+                      with a different filesystem layout.
+                      Example: --map-root /var/www:/srv/www
+
+Fresh-VPS recovery:
+  --bootstrap         Install required system packages (apt), start
+                      services (postgresql, nginx), install pm2, then
+                      run the restore. Requires root. Use with --map-root
+                      if paths need to change. Implies --yes.
 
 Without --archive, lists available remote backups (optionally filtered by
 --from/--to) and prompts.
@@ -106,7 +130,7 @@ function sshArgs(cfg, extra = []) {
 
 async function loadConfig(p) {
   const cfg = JSON.parse(await fs.readFile(p, "utf8"));
-  if (!cfg.ssh?.identityFile) cfg.ssh.identityFile = "/root/.ssh/id_ed25519";
+  if (!cfg.ssh?.identityFile) cfg.ssh.identityFile = "/root/.ssh/aegis_ed25519";
   return cfg;
 }
 
@@ -192,7 +216,133 @@ async function downloadFtp(cfg, name, dest) {
   } catch { /* optional */ }
 }
 
-// ---------- Dispatchers --------------------------------------------------
+// ---------- Path rewriting (--map-root) ---------------------------------
+
+function applyMapRoot(items, mappings) {
+  if (!mappings || mappings.length === 0) return items;
+  const pathFields = ["source", "cwd", "script", "path"];
+  return items.map((item) => {
+    const out = { ...item };
+    for (const m of mappings) {
+      const colon = m.indexOf(":");
+      if (colon < 0) continue;
+      const oldRoot = m.slice(0, colon);
+      const newRoot = m.slice(colon + 1);
+      for (const k of pathFields) {
+        if (typeof out[k] === "string" && out[k].startsWith(oldRoot)) {
+          out[k] = newRoot + out[k].slice(oldRoot.length);
+        }
+      }
+    }
+    return out;
+  });
+}
+
+// ---------- Fresh-VPS bootstrap (--bootstrap) ---------------------------
+
+async function bootstrapSystem(cfg, manifest) {
+  if (typeof process.getuid === "function" && process.getuid() !== 0) {
+    throw new Error("--bootstrap requires root (for apt-get install). Run with sudo.");
+  }
+
+  // Detect distro (best-effort; defaults to debian-family).
+  let distro = "debian";
+  try {
+    const osr = await fs.readFile("/etc/os-release", "utf8");
+    const id = osr.match(/^ID=([^\s]+)/m)?.[1]?.replace(/"/g, "");
+    if (id === "ubuntu") distro = "ubuntu";
+    else if (id === "debian") distro = "debian";
+  } catch {}
+
+  const kinds = new Set(manifest.items.map((i) => i.kind));
+
+  // Base packages always needed (including tools that download/install use).
+  const packages = [
+    "tar", "zstd", "ca-certificates", "curl", "gnupg",
+    "openssh-client", "rsync", "util-linux", "sqlite3",
+    "postgresql-client",
+  ];
+  if (kinds.has("postgres")) packages.push("postgresql");
+  if (kinds.has("nginx")) packages.push("nginx");
+
+  console.log(`\n[bootstrap] Detected: ${distro}`);
+  console.log(`[bootstrap] apt install: ${packages.join(" ")}`);
+  await runChecked("apt update", "apt-get", ["update", "-qq"]);
+  await runChecked("apt install", "apt-get", ["install", "-y", "-qq", ...packages]);
+
+  // Node.js — install via NodeSource 20.x if missing.
+  let needPm2 = kinds.has("pm2");
+  try {
+    await run("node", ["--version"]);
+  } catch {
+    console.log("[bootstrap] Installing Node.js 20.x via NodeSource");
+    const setup = `curl -fsSL https://deb.nodesource.com/setup_20.x | bash -`;
+    await runChecked("node setup", "bash", ["-c", setup]);
+    await runChecked("node install", "apt-get", ["install", "-y", "-qq", "nodejs"]);
+  }
+
+  // pm2 — install globally if needed and missing.
+  if (needPm2) {
+    try {
+      await run("pm2", ["--version"]);
+    } catch {
+      console.log("[bootstrap] Installing pm2 globally");
+      await runChecked("pm2 install", "npm", ["install", "-g", "pm2"]);
+    }
+  }
+
+  // Enable + start services whose data is in the manifest.
+  if (kinds.has("postgres")) {
+    console.log("[bootstrap] systemctl enable --now postgresql");
+    await run("systemctl", ["enable", "--now", "postgresql"]);
+    // Ensure the configured role exists (restores won't re-create owners).
+    const pgUser = cfg.postgres?.user;
+    if (pgUser && pgUser !== "postgres") {
+      const r = await run("sudo", ["-u", "postgres", "psql", "-tAc",
+        `SELECT 1 FROM pg_roles WHERE rolname='${pgUser}'`]);
+      if (!r.stdout.trim()) {
+        console.log(`[bootstrap] Creating postgres role '${pgUser}'`);
+        await run("sudo", ["-u", "postgres", "psql", "-c",
+          `CREATE ROLE "${pgUser}" WITH LOGIN SUPERUSER`]);
+      }
+    }
+  }
+  if (kinds.has("nginx")) {
+    console.log("[bootstrap] systemctl enable --now nginx");
+    await run("systemctl", ["enable", "--now", "nginx"]);
+  }
+
+  console.log("[bootstrap] System setup complete.\n");
+}
+
+async function startPm2Apps(cfg, manifest, stagingDir) {
+  const items = manifest.items.filter((i) => i.kind === "pm2");
+  if (items.length === 0) return;
+  for (const item of items) {
+    console.log(`\n[pm2] ${item.name} -> ${item.cwd}`);
+    // If node_modules was excluded (the default), reinstall before starting.
+    const hasPkg = existsSync(path.join(item.cwd, "package.json"));
+    const hasLock = existsSync(path.join(item.cwd, "package-lock.json"))
+      || existsSync(path.join(item.cwd, "yarn.lock"))
+      || existsSync(path.join(item.cwd, "pnpm-lock.yaml"));
+    if (hasPkg && hasLock) {
+      console.log(`[pm2]   npm ci (node_modules was excluded from archive)`);
+      const r = await run("npm", ["ci", "--no-audit", "--no-fund"],
+        { cwd: item.cwd });
+      if (r.code !== 0) {
+        console.log(`[pm2]   npm ci failed (exit ${r.code}) — continuing; pm2 may still work`);
+      }
+    }
+    const args = ["start", item.script, "--name", item.name];
+    if (item.instances && item.instances > 1) args.push("-i", String(item.instances));
+    args.push("--update-env");
+    await runChecked("pm2 start", "pm2", args, { cwd: item.cwd });
+  }
+  console.log("\n[pm2] pm2 save (persist across reboots)");
+  await run("pm2", ["save"]);
+}
+
+
 
 async function listRemote(cfg) {
   const transfer = cfg.transfer || "ssh";
@@ -344,7 +494,7 @@ async function main() {
   const opts = parseArgs(process.argv);
   if (opts.help) { printHelp(); return; }
   if (!existsSync(opts.config)) {
-    console.error(`No config at ${opts.config}. Run \`node backup.mjs --setup\` to create one.`);
+    console.error(`No config at ${opts.config}. Run \`node aegis.mjs --setup\` to create one.`);
     process.exit(2);
   }
   const cfg = await loadConfig(opts.config);
@@ -413,10 +563,29 @@ async function main() {
     return;
   }
 
-  await restorePostgres(cfg, stagingDir, manifest.items, opts.yes);
-  await restoreSqlite(stagingDir, manifest.items, opts.yes);
-  await restorePm2(stagingDir, manifest.items, opts.yes);
-  await restoreNginx(stagingDir, manifest.items, opts.yes);
+  // --bootstrap implies --yes (no prompts during fresh-VPS recovery).
+  if (opts.bootstrap) opts.yes = true;
+
+  // Rewrite manifest paths for cross-host restores.
+  let items = manifest.items;
+  if (opts.mapRoot.length > 0) {
+    items = applyMapRoot(items, opts.mapRoot);
+    console.log(`[map-root] Applied ${opts.mapRoot.length} mapping(s)`);
+  }
+
+  // Install system packages + start services before the restore.
+  if (opts.bootstrap) {
+    await bootstrapSystem(cfg, manifest);
+  }
+
+  await restorePostgres(cfg, stagingDir, items, opts.yes);
+  await restoreSqlite(stagingDir, items, opts.yes);
+  await restorePm2(stagingDir, items, opts.yes);
+  await restoreNginx(stagingDir, items, opts.yes);
+
+  if (opts.bootstrap) {
+    await startPm2Apps(cfg, manifest, stagingDir);
+  }
 
   console.log("\nDone. Review and restart affected services as needed.");
 }

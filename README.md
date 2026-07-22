@@ -246,11 +246,20 @@ node restore.mjs --list                       # only list
 node restore.mjs --archive <name>             # download + verify + prompt restore
 node restore.mjs --archive <name> --download-only   # just fetch+extract
 node restore.mjs --archive <name> --yes       # skip confirmations (DANGEROUS)
+
+# Date filtering (auto-pick newest backup ≤ --from if --archive omitted)
+node restore.mjs --from 2026-07-15            # restore the most recent backup from before that date
+
+# Cross-host restore (paths on the new host differ from the original)
+node restore.mjs --archive <name> --map-root /var/www:/srv/www --map-root /etc:/opt/etc --yes
+
+# Fresh-VPS recovery — installs services, restores data, starts everything
+sudo node restore.mjs --archive <name> --bootstrap --map-root /var/www:/srv/www
 ```
 
 The restore script dispatches on `config.transfer` — SSH uses `rsync` over ssh, FTP uses `curl`.
 
-The script always asks before overwriting anything. It restores:
+The script always asks before overwriting anything (unless `--yes` or `--bootstrap`). It restores:
 
 - **PostgreSQL**: drops & recreates the DB, then `pg_restore` from the `.pgdump` file
 - **SQLite**: copies the `.sqlitebak` back to its original path (from manifest)
@@ -258,6 +267,27 @@ The script always asks before overwriting anything. It restores:
 - **nginx**: copies back into `/etc/nginx/...`, then runs `nginx -t`
 
 After a PM2 restore you'll need to `pm2 reload all` and possibly re-run `npm ci` for any apps whose `node_modules` were excluded.
+
+### Fresh-VPS recovery (`--bootstrap`)
+
+For a complete disaster-recovery scenario, `sudo node restore.mjs --archive <name> --bootstrap` will:
+
+1. Install required system packages via apt (postgresql-server, nginx, sqlite3, etc. — only what's needed based on the manifest)
+2. Install Node.js 20.x via NodeSource (if missing)
+3. Install `pm2` globally via npm (if the manifest has PM2 items)
+4. `systemctl enable --now` postgresql / nginx
+5. Create the configured postgres role (so `pg_restore` works)
+6. Run the normal restore
+7. `npm ci` in each PM2 project's `cwd` (if `package.json` + lockfile present)
+8. `pm2 start` each app with its original name + instance count, then `pm2 save`
+
+Use `--map-root` together with `--bootstrap` if the destination host has a different filesystem layout (e.g., `/var/www` → `/srv/www`). The mapping is applied to `sqlite.source`, `pm2.cwd`, `pm2.script`, and `extras.path` before any file is written.
+
+**Prerequisites**:
+- The destination host has Node.js 18+ (or `--bootstrap` will install it via NodeSource)
+- Your SSH private key (`config.ssh.identityFile`) is present on the new host at the path `config.json` says
+- The `config.json` on the new host points to the same backup server (copy it from the original host)
+- Run as root (required for apt + systemctl)
 
 ## Notifications
 

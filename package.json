@@ -1,5 +1,5 @@
 {
-  "name": "Aegis",
+  "name": "aegis",
   "version": "1.2.0",
   "description": "VPS backup tool with TUI — backs up Postgres, SQLite, PM2 projects, nginx configs over SSH.",
   "type": "module",

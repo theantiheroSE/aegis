@@ -72,7 +72,7 @@ sudo apt install -y nodejs npm tar zstd postgresql-client sqlite3 openssh-client
 
 ```bash
 git clone https://github.com/theantiheroSE/aegis.git
-cd Aegis
+cd aegis
 npm install
 ```
 

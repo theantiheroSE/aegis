@@ -83,7 +83,7 @@ npm install
 Run with no config and the wizard starts automatically:
 
 ```bash
-node backup.mjs
+node aegis.mjs
 ```
 
 ```
@@ -149,14 +149,14 @@ chmod 600 config.json
 Run a dry-run to validate everything:
 
 ```bash
-node backup.mjs --dry-run
+node aegis.mjs --dry-run
 ```
 
 Then a real one (interactive TUI):
 
 ```bash
-node backup.mjs              # TTY: launches the TUI
-node backup.mjs --skip-prune # non-TTY: one-shot CLI run
+node aegis.mjs              # TTY: launches the TUI
+node aegis.mjs --skip-prune # non-TTY: one-shot CLI run
 ```
 
 ### 5. Install nightly cron
@@ -175,8 +175,8 @@ Cron output is appended to `/var/log/aegis.cron.log`.
 Re-run the wizard anytime with:
 
 ```bash
-node backup.mjs --setup          # only if missing/incomplete
-node backup.mjs --setup-force    # overwrite existing config
+node aegis.mjs --setup          # only if missing/incomplete
+node aegis.mjs --setup-force    # overwrite existing config
 ```
 
 ## Table of contents
@@ -192,7 +192,7 @@ node backup.mjs --setup-force    # overwrite existing config
 
 ## TUI
 
-After setup, `node backup.mjs` (no flags, on a TTY) launches the dashboard. During a backup, the right panel switches to a progress view with phase bars and live log:
+After setup, `node aegis.mjs` (no flags, on a TTY) launches the dashboard. During a backup, the right panel switches to a progress view with phase bars and live log:
 
 ```
 ┌─ Backup in progress — elapsed 0:42 ──────────────────────────────────────────┐
@@ -221,7 +221,8 @@ When no config exists, the TUI shows a 3-item "First run" menu offering to run t
 
 ```
 Aegis/
-├── tui.mjs              # interactive TUI launcher (default entry when config exists)
+├── aegis.mjs            # canonical entry point — auto-detects TTY, runs TUI or CLI
+├── tui.mjs              # full-screen TUI (also handles non-TTY → CLI fallback)
 ├── backup.mjs           # one-shot CLI; also exports runBackup / uploadBundle / pruneRemote
 ├── restore.mjs          # interactive restore from a remote archive (SSH or FTP)
 ├── verify.mjs           # verify an archive's SHA256 and internal structure
@@ -368,7 +369,7 @@ See [`config.example.json`](./config.example.json). Notable fields:
 | `notifications.smtp.from` / `to` | sender / recipient addresses |
 | `logging.dir` | where to write per-run logs (CLI mode) |
 
-## CLI flags (`backup.mjs`)
+## CLI flags (`aegis.mjs` / `backup.mjs`)
 
 ```
 -c, --config <path>     Config file (default: ./config.json)
@@ -383,7 +384,7 @@ See [`config.example.json`](./config.example.json). Notable fields:
 -V, --version
 ```
 
-`node backup.mjs` with **no** flags on a TTY launches the TUI. On a non-TTY or with any backup flag, it runs as a one-shot CLI.
+`node aegis.mjs` with **no** flags on a TTY launches the TUI. On a non-TTY or with any backup flag, it runs as a one-shot CLI.
 
 ## Notes & gotchas
 

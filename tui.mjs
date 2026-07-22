@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // tui.mjs — full-screen ncurses-style terminal UI for aegis.
-//
-// Run:  node tui.mjs            (or: node backup.mjs without args, auto-launches TUI)
+// Imported by aegis.mjs (the canonical entry point). On a TTY, launches the
+// dashboard; on a non-TTY (cron, scripts) or when AEGIS_NO_TUI=1, runs as CLI.
 //
 import blessed from "neo-blessed";
 import { spawn } from "node:child_process";

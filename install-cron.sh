@@ -43,7 +43,7 @@ fi
 if ! crontab -l 2>/dev/null | grep -qF "$MARK"; then
   ( crontab -l 2>/dev/null || true; \
     printf '\n%s %s %s %s >> /var/log/aegis.cron.log 2>&1\n' \
-      "$SCHEDULE" "$NODE_BIN" "$TOOL_DIR/backup.mjs" "$MARK" ) | crontab -
+      "$SCHEDULE" "$NODE_BIN" "$TOOL_DIR/aegis.mjs" "$MARK" ) | crontab -
   echo "Installed Aegis cron job: '$SCHEDULE'"
 else
   echo "Aegis cron job already present (use --uninstall first to change)."

@@ -1,11 +1,11 @@
 {
-  "name": "vps-backup",
+  "name": "Aegis",
   "version": "1.2.0",
   "description": "VPS backup tool with TUI — backs up Postgres, SQLite, PM2 projects, nginx configs over SSH.",
   "type": "module",
   "main": "tui.mjs",
   "bin": {
-    "vps-backup": "./tui.mjs"
+    "Aegis": "./tui.mjs"
   },
   "scripts": {
     "start": "node tui.mjs",

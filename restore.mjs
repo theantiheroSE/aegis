@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// restore.mjs — interactive restore from a remote vps-backup archive.
+// restore.mjs — interactive restore from a remote Aegis archive.
 //
 // Usage:
 //   node restore.mjs                          # list remote backups and prompt
@@ -55,7 +55,7 @@ function parseDateFilter(input, label) {
 }
 
 function printHelp() {
-  console.log(`restore.mjs — restore from a vps-backup archive.
+  console.log(`restore.mjs — restore from a Aegis archive.
 
 Usage:
   node restore.mjs [--config path] [--archive <name>] [--from <date>] [--to <date>] [--list] [--download-only <name>] [--yes]
@@ -124,7 +124,7 @@ async function listRemoteSsh(cfg) {
   const r = await run("ssh", [
     ...sshArgs(cfg),
     `${cfg.ssh.user}@${cfg.ssh.host}`,
-    `ls -1t ${cfg.ssh.remoteDir}/vps-backup-*.tar.zst 2>/dev/null | sed 's|.*/||'`,
+    `ls -1t ${cfg.ssh.remoteDir}/aegis-*.tar.zst 2>/dev/null | sed 's|.*/||'`,
   ]);
   if (r.code !== 0) throw new Error(`ssh list failed: ${r.stderr}`);
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -163,7 +163,7 @@ async function listRemoteFtp(cfg) {
     "--list-only", base,
   ]);
   if (r.code !== 0) throw new Error(`ftp list failed: ${r.stderr || r.stdout}`);
-  return r.stdout.split("\n").map((s) => s.trim()).filter((s) => /^vps-backup-.*\.tar\.(zst|gz)$/.test(s))
+  return r.stdout.split("\n").map((s) => s.trim()).filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s))
     .sort().reverse(); // newest first
 }
 
@@ -362,7 +362,7 @@ async function main() {
     // Apply --to (lower bound) and --from (upper bound) date filters.
     if (fromDate || toDate) {
       const filtered = list.filter((name) => {
-        const m = name.match(/vps-backup-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
+        const m = name.match(/aegis-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
         if (!m) return false;
         const ts = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`).getTime();
         if (Number.isNaN(ts)) return false;

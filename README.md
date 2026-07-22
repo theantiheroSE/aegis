@@ -1,4 +1,4 @@
-# vps-backup
+# Aegis
 
 > Node.js backup tool for a single VPS — snapshots PM2 projects, PostgreSQL, SQLite, and nginx into one dated `.tar.zst` archive, uploads to your backup server over SSH or FTP, prunes old archives, and notifies you on success/failure.
 
@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/platform-linux--x64-lightgrey)](#requirements)
 
 ```
-┌─ vps-backup v1.2.0 — vps.theantihero.se ────────────────────────────────────────┐
+┌─ Aegis v1.2.0 — vps.theantihero.se ────────────────────────────────────────┐
 │ ┌─ Actions ─────────┐ ┌─ Status ───────────────────────────────────────────────┐ │
 │ │ ▶ Backup now      │ │ Target:   root@backup.example.com:/backups/vps          │ │
 │ │   Quick backup    │ │ Cron:     installed  0 2 * * *  (next: in 5h 21m)       │ │
@@ -64,8 +64,8 @@ sudo apt install -y nodejs npm tar zstd postgresql-client sqlite3 openssh-client
 ### 2. Clone & install
 
 ```bash
-git clone https://github.com/theantiheroSE/vps-backup.git
-cd vps-backup
+git clone https://github.com/theantiheroSE/aegis.git
+cd Aegis
 npm install
 ```
 
@@ -80,7 +80,7 @@ node backup.mjs
 ```
 
 ```
-┌─ vps-backup first-time setup ────────────────────────────────────────────┐
+┌─ Aegis first-time setup ────────────────────────────────────────────┐
 │                                                                          │
 │   1. SSH  (recommended)  — encrypted, uses an SSH keypair               │
 │   2. FTP                  — plain FTP or FTPS, password auth             │
@@ -92,14 +92,14 @@ node backup.mjs
 **SSH path** (recommended):
 
 ```
-→ Generating ed25519 keypair at /root/.ssh/vps-backup_ed25519 ...
+→ Generating ed25519 keypair at /root/.ssh/aegis_ed25519 ...
   ✓ Key generated.
 
 ┌── Add this PUBLIC key to your backup server ───────────────────────────┐
 │                                                                          │
 │  On the backup server, run:                                              │
 │    mkdir -p ~/.ssh && chmod 700 ~/.ssh                                   │
-│    echo 'ssh-ed25519 AAAA...vps-backup@vps.theantihero.se' >> ~/.ssh/authorized_keys │
+│    echo 'ssh-ed25519 AAAA...aegis@vps.theantihero.se' >> ~/.ssh/authorized_keys │
 │    chmod 600 ~/.ssh/authorized_keys                                      │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -163,7 +163,7 @@ node backup.mjs --skip-prune # non-TTY: one-shot CLI run
 
 Or from the TUI: pick **Install / update cron** → choose a schedule (or **Custom** to type one).
 
-Cron output is appended to `/var/log/vps-backup.cron.log`.
+Cron output is appended to `/var/log/aegis.cron.log`.
 
 Re-run the wizard anytime with:
 
@@ -213,7 +213,7 @@ When no config exists, the TUI shows a 3-item "First run" menu offering to run t
 ## Layout
 
 ```
-vps-backup/
+Aegis/
 ├── tui.mjs              # interactive TUI launcher (default entry when config exists)
 ├── backup.mjs           # one-shot CLI; also exports runBackup / uploadBundle / pruneRemote
 ├── restore.mjs          # interactive restore from a remote archive (SSH or FTP)
@@ -318,7 +318,7 @@ If your VPS can send mail directly (postfix/exim/sendmail/msmtp already configur
 After configuring the MTA, test delivery from a shell:
 
 ```bash
-echo "test" | mailx -s "vps-backup test" you@example.com
+echo "test" | mailx -s "Aegis test" you@example.com
 ```
 
 If that works, the TUI's **Test notifications now** will work too.
@@ -331,7 +331,7 @@ See [`config.example.json`](./config.example.json). Notable fields:
 |---|---|
 | `transfer` | `"ssh"` or `"ftp"` |
 | `ssh.host` / `ssh.user` / `ssh.port` | SSH backup destination |
-| `ssh.identityFile` | path to SSH private key (wizard creates `/root/.ssh/vps-backup_ed25519`) |
+| `ssh.identityFile` | path to SSH private key (wizard creates `/root/.ssh/aegis_ed25519`) |
 | `ssh.remoteDir` | remote directory for archives |
 | `ftp.host` / `ftp.port` / `ftp.user` / `ftp.password` | FTP credentials |
 | `ftp.secure` | use FTPS (TLS) instead of plain FTP |
@@ -387,7 +387,7 @@ See [`config.example.json`](./config.example.json). Notable fields:
 - CLI logs go to `logs/backup-<timestamp>.log` and include stdout/stderr of every spawned process. TUI logs are only shown in the live log panel during the run.
 - `.env` files, SSH keys, and any `config.json` files **are not** excluded from your project tarballs. Don't commit secrets to git in the first place; backups will faithfully copy whatever you have.
 - FTP password is stored in `config.json` in plaintext. That file is chmod 600 by the wizard. If you'd rather, move it to a `.netrc`-style file or an env var and edit `uploadBundle`/`pruneRemote` accordingly.
-- The wizard generates an SSH key with no passphrase so cron can use it unattended. If you want a passphrase, generate the key yourself (`ssh-keygen -t ed25519 -f /root/.ssh/vps-backup_ed25519`) and update `config.json` to point at it; cron will need `ssh-agent` or a keychain helper then.
+- The wizard generates an SSH key with no passphrase so cron can use it unattended. If you want a passphrase, generate the key yourself (`ssh-keygen -t ed25519 -f /root/.ssh/aegis_ed25519`) and update `config.json` to point at it; cron will need `ssh-agent` or a keychain helper then.
 
 ## Troubleshooting
 

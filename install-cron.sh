@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-cron.sh — install the vps-backup nightly cron job.
+# install-cron.sh — install the Aegis nightly cron job.
 #
 # Usage:
 #   ./install-cron.sh                # install with default schedule (02:00 daily)
@@ -11,7 +11,7 @@ set -euo pipefail
 TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NODE_BIN="$(command -v node)"
 SCHEDULE="${1:-0 2 * * *}"
-MARK="# vps-backup"
+MARK="# Aegis"
 
 usage() {
   sed -n '2,12p' "$0"
@@ -23,15 +23,15 @@ usage() {
 if [[ "${1:-}" == "--uninstall" ]]; then
   if crontab -l 2>/dev/null | grep -qF "$MARK"; then
     crontab -l | grep -vF "$MARK" | crontab -
-    echo "Removed vps-backup cron job."
+    echo "Removed Aegis cron job."
   else
-    echo "No vps-backup cron job found."
+    echo "No Aegis cron job found."
   fi
   exit 0
 fi
 
 if [[ "${1:-}" == "--show" ]]; then
-  crontab -l 2>/dev/null | grep -F "$MARK" || echo "(no vps-backup cron job installed)"
+  crontab -l 2>/dev/null | grep -F "$MARK" || echo "(no Aegis cron job installed)"
   exit 0
 fi
 
@@ -42,11 +42,11 @@ fi
 
 if ! crontab -l 2>/dev/null | grep -qF "$MARK"; then
   ( crontab -l 2>/dev/null || true; \
-    printf '\n%s %s %s %s >> /var/log/vps-backup.cron.log 2>&1\n' \
+    printf '\n%s %s %s %s >> /var/log/aegis.cron.log 2>&1\n' \
       "$SCHEDULE" "$NODE_BIN" "$TOOL_DIR/backup.mjs" "$MARK" ) | crontab -
-  echo "Installed vps-backup cron job: '$SCHEDULE'"
+  echo "Installed Aegis cron job: '$SCHEDULE'"
 else
-  echo "vps-backup cron job already present (use --uninstall first to change)."
+  echo "Aegis cron job already present (use --uninstall first to change)."
 fi
 echo "Cron entries:"
 crontab -l | grep -F "$MARK" || true

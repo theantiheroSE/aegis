@@ -44,7 +44,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`verify.mjs — verify integrity of a remote vps-backup archive.
+  console.log(`verify.mjs — verify integrity of a remote Aegis archive.
 
 Usage:
   node verify.mjs [--config path] --archive <name> [--keep]
@@ -89,7 +89,7 @@ async function listRemoteSsh(cfg) {
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ConnectTimeout=15",
     `${cfg.ssh.user}@${cfg.ssh.host}`,
-    `cd ${cfg.ssh.remoteDir} && ls -1t vps-backup-*.tar.zst vps-backup-*.tar.gz 2>/dev/null`,
+    `cd ${cfg.ssh.remoteDir} && ls -1t aegis-*.tar.zst aegis-*.tar.gz 2>/dev/null`,
   ]);
   if (r.code !== 0) return [];
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -109,7 +109,7 @@ async function listRemoteFtp(cfg) {
   if (r.code !== 0) return [];
   return r.stdout.split("\n")
     .map((s) => s.trim())
-    .filter((s) => /^vps-backup-.*\.tar\.(zst|gz)$/.test(s))
+    .filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s))
     .sort().reverse();
 }
 

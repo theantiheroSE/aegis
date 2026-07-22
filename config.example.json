@@ -39,7 +39,7 @@
     },
     "email": {
       "to": "ops@example.com",
-      "from": "vps-backup@example.com"
+      "from": "aegis@example.com"
     },
     "smtp": {
       "host": "smtp.gmail.com",

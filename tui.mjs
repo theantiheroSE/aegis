@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// tui.mjs — full-screen ncurses-style terminal UI for vps-backup.
+// tui.mjs — full-screen ncurses-style terminal UI for aegis.
 //
 // Run:  node tui.mjs            (or: node backup.mjs without args, auto-launches TUI)
 //
@@ -24,7 +24,7 @@ const ARCHIVE_DIR_DEFAULT = "/var/backups/vps/archive";
 
 // ---------- non-TTY fallback ----------------------------------------------
 
-if (!process.stdout.isTTY || process.env.VPS_BACKUP_NO_TUI) {
+if (!process.stdout.isTTY || process.env.AEGIS_NO_TUI) {
   const opts = parseArgs(process.argv);
   if (opts.help) { console.log(printHelp()); process.exit(0); }
   if (opts.version) { console.log(VERSION); process.exit(0); }
@@ -108,7 +108,7 @@ async function listRemoteBackupsSsh(cfg) {
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ConnectTimeout=8",
     `${cfg.ssh.user}@${cfg.ssh.host}`,
-    `ls -1t ${cfg.ssh.remoteDir}/vps-backup-*.tar.zst 2>/dev/null | sed 's|.*/||'`,
+    `ls -1t ${cfg.ssh.remoteDir}/aegis-*.tar.zst 2>/dev/null | sed 's|.*/||'`,
   ]);
   if (r.code !== 0) return [];
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -129,7 +129,7 @@ async function listRemoteBackupsFtp(cfg) {
   if (r.code !== 0) return [];
   return r.stdout.split("\n")
     .map((s) => s.trim())
-    .filter((s) => /^vps-backup-.*\.tar\.(zst|gz)$/.test(s))
+    .filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s))
     .sort().reverse();
 }
 
@@ -146,7 +146,7 @@ async function remoteDiskInfoSsh(cfg) {
     `cd ${cfg.ssh.remoteDir} 2>/dev/null &&`,
     `free=$(df -PB1 . 2>/dev/null | awk 'NR==2 {print $4}')`,
     `total=$(df -PB1 . 2>/dev/null | awk 'NR==2 {print $2}')`,
-    `cnt=$(ls vps-backup-*.tar.zst 2>/dev/null | wc -l)`,
+    `cnt=$(ls aegis-*.tar.zst 2>/dev/null | wc -l)`,
     `siz=$(du -sb . 2>/dev/null | awk '{print $1}')`,
     `echo "$free|$total|$cnt|$siz"`,
   ].join("; ");
@@ -185,7 +185,7 @@ async function remoteDiskInfoFtp(cfg) {
   if (r.code !== 0) return out;
   const names = r.stdout.split("\n")
     .map((s) => s.trim())
-    .filter((s) => /^vps-backup-.*\.tar\.(zst|gz)$/.test(s));
+    .filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s));
   out.ok = true;
   out.count = names.length;
   return out;
@@ -229,7 +229,7 @@ function parseCronLine(line) {
 }
 
 async function getCrontabEntry() {
-  const r = await shell("bash", ["-c", "crontab -l 2>/dev/null | grep -F '# vps-backup' || true"]);
+  const r = await shell("bash", ["-c", "crontab -l 2>/dev/null | grep -F '# Aegis' || true"]);
   return r.stdout.trim() ? parseCronLine(r.stdout.trim()) : null;
 }
 
@@ -254,7 +254,7 @@ class Tui {
 
     this.screen = blessed.screen({
       smartCSR: true,
-      title: `vps-backup ${VERSION}`,
+      title: `Aegis ${VERSION}`,
       fullUnicode: true,
       autoPadding: true,
     });
@@ -293,7 +293,7 @@ class Tui {
       parent: this.screen, top: 0, left: 0, right: 0, height: 1,
       tags: false,
       style: { fg: "black", bg: "cyan" },
-      content: ` ${C.bold("vps-backup")} v${VERSION} — ${os.hostname()} `,
+      content: ` ${C.bold("Aegis")} v${VERSION} — ${os.hostname()} `,
     });
 
     // Footer — gray bar at the bottom
@@ -540,7 +540,7 @@ class Tui {
       tags: false, keys: true,
     });
     help.setContent([
-      C.bold("vps-backup TUI"),
+      C.bold("Aegis TUI"),
       "",
       C.yellow("Navigation:"),
       "  ↑/↓ or j/k    Move selection",
@@ -751,7 +751,7 @@ class Tui {
       r.stdout.on("data", (b) => { out += b.toString(); });
       r.on("close", () => resolve(out.trim() || "/usr/bin/script"));
     });
-    const env = { ...process.env, VPS_BACKUP_NO_TUI: "1" };
+    const env = { ...process.env, AEGIS_NO_TUI: "1" };
     const cmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(TOOL_DIR, "backup.mjs"))} --setup --config ${JSON.stringify(this.cfgPath)}`;
     const child = spawn(
       scriptPath,
@@ -800,7 +800,7 @@ class Tui {
         // subprocess. The parent process stays alive until the new TUI
         // exits so it can keep the TTY session consistent.
         setTimeout(() => {
-          const env = { ...process.env, VPS_BACKUP_NO_SETUP: "1" };
+          const env = { ...process.env, AEGIS_NO_SETUP: "1" };
           const next = spawn(process.execPath, [
             path.join(TOOL_DIR, "tui.mjs"), "--config", this.cfgPath,
           ], { stdio: "inherit", env, detached: false });
@@ -1231,7 +1231,7 @@ class Tui {
           const to = await this.prompt("Email recipient (to):", cur.email?.to || "");
           if (to) cur.email = { ...cur.email, to };
         } else if (idx === 4) {
-          const from = await this.prompt("Email sender (from):", cur.email?.from || "vps-backup");
+          const from = await this.prompt("Email sender (from):", cur.email?.from || "Aegis");
           if (from) cur.email = { ...cur.email, from };
         } else if (idx === 5) {
           await this.configureSmtp();

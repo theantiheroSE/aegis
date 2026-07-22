@@ -45,7 +45,7 @@ export function parseArgs(argv) {
 }
 
 export function printHelp() {
-  return `vps-backup ${VERSION}
+  return `Aegis ${VERSION}
 
 Usage:
   node backup.mjs [options]            # one-shot backup, or TUI if no flags + TTY
@@ -351,7 +351,7 @@ async function sha256File(p) {
 
 async function writeManifest(outDir, items) {
   const manifest = {
-    tool: `vps-backup ${VERSION}`,
+    tool: `Aegis ${VERSION}`,
     hostname: os.hostname(),
     generatedAt: new Date().toISOString(),
     items,
@@ -537,7 +537,7 @@ export async function runBackup(cfg, opts = {}, bus = null) {
 
     // Final archive
     phaseStart("archive", "Creating final archive...", 1);
-    const archive = path.join(cfg.localArchiveDir || staging, `vps-backup-${tsName}.tar.zst`);
+    const archive = path.join(cfg.localArchiveDir || staging, `aegis-${tsName}.tar.zst`);
     await fs.mkdir(path.dirname(archive), { recursive: true });
     const finalSrc = path.basename(staging);
     const finalParent = path.dirname(staging);
@@ -703,7 +703,7 @@ export async function pruneRemote(cfg, opts = {}) {
 async function listRemoteSshDetailed(cfg) {
   const cmd = [
     `cd ${shellQuote(cfg.ssh.remoteDir)}`,
-    `for f in vps-backup-*.tar.zst vps-backup-*.tar.gz; do`,
+    `for f in aegis-*.tar.zst aegis-*.tar.gz; do`,
     `  [ -f "$f" ] || continue;`,
     `  echo "$(stat -c %Y "$f") $f";`,
     `done | sort -rn`,
@@ -739,7 +739,7 @@ async function listRemoteFtpDetailed(cfg) {
     for (const raw of listCmd.stdout.trim().split("\n")) {
       const m = raw.match(/^modify=(\d{14});.*?\s(\S+)\s*$/);
       if (!m) continue;
-      if (!/^vps-backup-.*\.tar\.(zst|gz)$/.test(m[2])) continue;
+      if (!/^aegis-.*\.tar\.(zst|gz)$/.test(m[2])) continue;
       const ts = `${m[1].slice(0,4)}-${m[1].slice(4,6)}-${m[1].slice(6,8)}T${m[1].slice(8,10)}:${m[1].slice(10,12)}:${m[1].slice(12,14)}Z`;
       out.push({ name: m[2], epoch: Math.floor(new Date(ts).getTime() / 1000) });
     }
@@ -757,10 +757,10 @@ async function listRemoteFtpDetailed(cfg) {
     "--list-only", base,
   ]);
   if (r.code !== 0) return [];
-  const names = r.stdout.split("\n").map((s) => s.trim()).filter((s) => /^vps-backup-.*\.tar\.(zst|gz)$/.test(s));
+  const names = r.stdout.split("\n").map((s) => s.trim()).filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s));
   names.sort().reverse();
   for (const n of names) {
-    const m = n.match(/vps-backup-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
+    const m = n.match(/aegis-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
     if (m) {
       const ts = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`;
       out.push({ name: n, epoch: Math.floor(new Date(ts).getTime() / 1000) });
@@ -818,7 +818,7 @@ export async function runFullBackup(cfgPath, opts = {}) {
   setBus(null);
   await openLog(cfgPath ? path.dirname(cfgPath) : TOOL_DIR, "backup");
   const cfg = await loadConfig(cfgPath);
-  info(`vps-backup ${VERSION} starting (dry-run=${opts.dryRun}, skip-upload=${opts.skipUpload})`);
+  info(`Aegis ${VERSION} starting (dry-run=${opts.dryRun}, skip-upload=${opts.skipUpload})`);
   info(`hostname=${os.hostname()} config=${cfgPath}`);
 
   const startedAt = Date.now();
@@ -900,7 +900,7 @@ async function main() {
   // handle it interactively).
   const { isFirstRun } = await import("./lib/setup.mjs");
   const status = isFirstRun(opts.config);
-  if (status.firstRun && !process.env.VPS_BACKUP_NO_SETUP) {
+  if (status.firstRun && !process.env.AEGIS_NO_SETUP) {
     // If we're going to launch the TUI below, let it show the wizard UI;
     // otherwise run the CLI wizard now.
     const hasAction = opts.dryRun || opts.skipUpload || opts.skipPrune || opts.only;
@@ -924,7 +924,7 @@ async function main() {
 
   // No actionable flags → launch the TUI (when stdout is a TTY).
   const hasAction = opts.dryRun || opts.skipUpload || opts.skipPrune || opts.only;
-  if (!hasAction && process.stdout.isTTY && !process.env.VPS_BACKUP_NO_TUI) {
+  if (!hasAction && process.stdout.isTTY && !process.env.AEGIS_NO_TUI) {
     const { spawn } = await import("node:child_process");
     const child = spawn(process.execPath, [path.join(TOOL_DIR, "tui.mjs"), "--config", opts.config], {
       stdio: "inherit",

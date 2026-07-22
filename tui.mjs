@@ -374,21 +374,32 @@ class Tui {
   }
 
   menuItems() {
-    return [
+    const items = [
+      "── Run ──────────────────",
       C.green("▶ Backup now (full)"),
       "  Quick backup (postgres+sqlite)",
+      "── Browse ───────────────",
       "  List remote backups",
       "  Restore from backup...",
       "  Verify backup integrity",
       "  View logs",
       "  Test remote connection",
+      "── Maintain ──────────────",
       "  Prune remote now",
       "  Refresh status",
       "  Install / update cron",
+      "── Configure ─────────────",
       "  Configure notifications",
       "  Edit config",
+      "──────────────────────────",
       C.gray("  Quit"),
     ];
+    // Indices of section headers — non-selectable dividers.
+    this._menuHeaderIdxs = [];
+    items.forEach((it, i) => {
+      if (typeof it === "string" && it.startsWith("── ")) this._menuHeaderIdxs.push(i);
+    });
+    return items;
   }
 
   bindKeys() {
@@ -702,13 +713,21 @@ class Tui {
 
   async activate(idx) {
     if (this.busy) return;
-    if (this.firstRun) {
-      if (idx === 0) return this.runSetupWizard();
-      if (idx === 1) return this.editConfig();
-      if (idx === 2) return this.quit();
+    // Header lines are non-selectable dividers — auto-advance on Enter.
+    if (this._menuHeaderIdxs && this._menuHeaderIdxs.includes(idx)) {
+      this.menu.down();
       return;
     }
-    switch (idx) {
+    // Map the raw list idx (which includes header offsets) to the action idx.
+    const headersBefore = (this._menuHeaderIdxs || []).filter((h) => h < idx).length;
+    const a = idx - headersBefore;
+    if (this.firstRun) {
+      if (a === 0) return this.runSetupWizard();
+      if (a === 1) return this.editConfig();
+      if (a === 2) return this.quit();
+      return;
+    }
+    switch (a) {
       case 0: return this.startBackup({});
       case 1: return this.startBackup({ only: ["postgres", "sqlite"] });
       case 2: return this.showListBackups();

@@ -1,20 +1,20 @@
 ---
 layout: default
 title: Aegis
-description: Node.js backup tool for a single VPS — snapshots PM2, PostgreSQL, SQLite, nginx into .tar.zst, uploads via SSH/FTP, prunes old archives, notifies on success/failure.
+description: Node.js backup tool for a single VPS — snapshots PM2, PostgreSQL, MySQL/MariaDB, SQLite, nginx into .tar.zst (optionally age-encrypted), uploads via SSH/FTP/S3, prunes old archives, notifies on success/failure, pings a dead-man's switch.
 theme: jekyll-theme-cayman
 ---
 
 # Aegis
 
-> Node.js backup tool for a single VPS — snapshots PM2 projects, PostgreSQL, SQLite, and nginx into one dated `.tar.zst` archive, uploads to your backup server over SSH or FTP, prunes old archives, and notifies you on success/failure.
+> Node.js backup tool for a single VPS — snapshots PM2 projects, PostgreSQL, MySQL/MariaDB, SQLite, and nginx into one dated `.tar.zst` archive (optionally age-encrypted), uploads to SSH/FTP/S3, prunes old archives, notifies on success/failure, and pings a dead-man's switch.
 
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-green)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 [![Platform](https://img.shields.io/badge/platform-linux--x64-lightgrey)](#requirements)
 
 ```
-┌─ Aegis v1.2.0 — vps.theantihero.se ────────────────────────────────────────┐
+┌─ Aegis v1.3.0 — vps.theantihero.se ────────────────────────────────────────┐
 │ ┌─ Actions ─────────┐ ┌─ Status ───────────────────────────────────────────────┐ │
 │ │ ▶ Backup now      │ │ Target:   root@backup.example.com:/backups/vps          │ │
 │ │   Quick backup    │ │ Cron:     installed  0 2 * * *  (next: in 5h 21m)       │ │
@@ -31,11 +31,17 @@ theme: jekyll-theme-cayman
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **All-in-one backup** — PM2 projects, PostgreSQL DBs, SQLite files, nginx config, and any extra paths you specify
+- **All-in-one backup** — PM2 projects, PostgreSQL/MySQL/MariaDB, Redis, MongoDB, SQLite files, nginx config, and any extra paths you specify
 - **Interactive TUI** — neo-blessed dashboard, one-shot setup wizard, no config editing required
-- **One archive** — `.tar.zst` with a `.sha256` sidecar, `zstd -T0` (all cores)
-- **SSH or FTP/FTPS** — SSH via ed25519 keypair (recommended), FTP for legacy destinations
-- **Direct-SMTP notifications** — webhook, local-MTA, or SMTP credentials stored in the tool (no MTA needed)
+- **One archive** — `.tar.zst` (or `.tar.zst.age` if age-encrypted), with a `.sha256` sidecar, `zstd -T0` (all cores); per-phase compression tuning
+- **SSH, FTP/FTPS, or S3-compatible storage** — SSH via ed25519 keypair (recommended), FTP for legacy, `rclone` for S3/B2/R2/etc.
+- **Optional age encryption** — server only sees ciphertext, restore requires an identity file (or passphrase)
+- **Direct-SMTP notifications** — webhook (with optional HMAC signing), local-MTA, SMTP credentials stored in the tool, or a dead-man's switch (healthchecks.io / Uptime Kuma)
+- **Pre/post hooks** — run arbitrary shell commands before/after backup and upload
+- **Aegis state bundle** — backs up its own config, ssh key, state, and cron, so a fresh VPS can be bootstrapped from one archive
+- **Restore verification** — `--verify` extracts the archive and runs `pg_restore --list`, sqlite integrity checks, MySQL scratch-DB apply, `redis-cli ping`, `nginx -t`, and `tar -t` on every component; `--verify-latest` does it weekly on a cron
+- **Restore plan** — `--plan` prints exactly what would happen during a restore, without touching anything
+- **Run summary** — each run writes a Markdown and HTML summary next to the log file
 - **Nightly cron** — single `install-cron.sh` line, retention by age
 - **Restore from the TUI** — lists remote archives, downloads + verifies + restores in one go
 
@@ -253,6 +259,8 @@ node restore.mjs --list                       # only list
 node restore.mjs --archive <name>             # download + verify + prompt restore
 node restore.mjs --archive <name> --download-only   # just fetch+extract
 node restore.mjs --archive <name> --yes       # skip confirmations (DANGEROUS)
+node restore.mjs --archive <name> --plan      # show what would happen, don't touch anything
+node restore.mjs --archive <name> --verify --download-only   # extract + per-component check, no restore
 
 # Date filtering (auto-pick newest backup ≤ --from if --archive omitted)
 node restore.mjs --from 2026-07-15            # restore the most recent backup from before that date
@@ -268,12 +276,26 @@ The restore script dispatches on `config.transfer` — SSH uses `rsync` over ssh
 
 The script always asks before overwriting anything (unless `--yes` or `--bootstrap`). It restores:
 
-- **PostgreSQL**: drops & recreates the DB, then `pg_restore` from the `.pgdump` file
+- **PostgreSQL / MySQL / MariaDB / MongoDB**: drops & recreates the DB, then `pg_restore` / `mysql` / `mongorestore` from the dump file
+- **Redis**: stops redis-server, copies `dump.rdb` back, restarts, verifies with PING
 - **SQLite**: copies the `.sqlitebak` back to its original path (from manifest)
-- **PM2**: extracts the project tarball over its original `pm_cwd`
+- **PM2**: extracts the project tarball over its original `pm_cwd`, then `npm ci` + `pm2 start`
 - **nginx**: copies back into `/etc/nginx/...`, then runs `nginx -t`
+- **extras**: extracts each tarball over its original path
+- **aegis** (state bundle): restores `config.json`, ssh key, `state.json`, and crontab
 
-After a PM2 restore you'll need to `pm2 reload all` and possibly re-run `npm ci` for any apps whose `node_modules` were excluded.
+After a PM2 restore you'll need to `pm2 reload all` if you didn't use `--yes` with `--bootstrap`.
+
+### Scheduled verification (`--verify-latest`)
+
+For the "is my backup still actually restorable?" question, schedule a weekly cron that downloads just the latest archive and verifies it:
+
+```bash
+./install-cron.sh --verify                  # adds Sun 06:00 by default
+./install-cron.sh --verify "30 6 * * 0"    # or your own schedule
+```
+
+The cron entry calls `restore.mjs --verify-latest --yes`, which finds the newest archive, downloads it, runs the same per-component checks as `--verify`, then deletes the staging dir. Exits non-zero on any failure.
 
 ### Fresh-VPS recovery (`--bootstrap`)
 
@@ -379,17 +401,27 @@ See [`config.example.json`](./config.example.json). Notable fields:
 | `postgres.enabled` | include all non-template DBs |
 | `postgres.user` / `postgres.host` / `postgres.port` | how to connect |
 | `postgres.runAs` | if set, `pg_dump`/`psql` are run via `runuser -u <runAs> --` — set this when your `pg_hba.conf` requires peer auth on the unix socket (which is the default on Debian/Ubuntu) |
+| `mysql.enabled` | include all non-system MySQL/MariaDB databases |
+| `redis.enabled` | include a Redis snapshot (`dump.rdb` after `BGSAVE`) |
+| `mongodb.enabled` | include MongoDB databases (`mongodump --gzip`) |
+| `aegis.enabled` | back up Aegis's own config, ssh key, state.json, and cron |
 | `sqlite.searchPaths` | directories to recursively scan for `*.db`/`*.sqlite` |
 | `sqlite.excludePaths` | path substrings to skip (e.g. caches) |
 | `sqlite.patterns` | filename globs to consider SQLite |
 | `pm2.excludeDirs` | relative paths excluded from each PM2 project tarball |
 | `nginx.*` | what to copy from the nginx config tree |
 | `extraPaths` | additional files / directories to include |
+| `archive.compressionLevel` | default zstd level (1-19, default 3) |
+| `archive.compressionByPhase` | per-phase zstd level overrides, e.g. `{ "pm2": 19, "postgres": 3, "extras": 9 }` |
+| `encryption.recipients` | array of age public keys (`age1...`) to encrypt to |
+| `encryption.identityFiles` | array of age identity files for restore |
+| `hooks.preBackup` / `postBackup` / `preUpload` / `postUpload` | shell commands to run around each phase |
 | `notifications.onFailure` | send notification when a backup fails (default `true`) |
 | `notifications.onSuccess` | send notification on successful backup (default `false`) |
 | `notifications.webhook.url` | webhook endpoint to `POST` JSON to |
 | `notifications.webhook.method` | HTTP method (default `POST`) |
 | `notifications.webhook.headers` | extra headers, e.g. auth tokens |
+| `notifications.webhook.secret` | HMAC-SHA256 signing secret — adds `X-Aegis-Signature: sha256=<hex>` header |
 | `notifications.email.to` | recipient address (passed to local `mailx`/`sendmail`) |
 | `notifications.email.from` | sender address shown in the `From:` header |
 | `notifications.smtp.host` | SMTP server hostname (direct SMTP channel via nodemailer) |
@@ -397,6 +429,7 @@ See [`config.example.json`](./config.example.json). Notable fields:
 | `notifications.smtp.secure` | `true` for TLS-on-connect (port 465), `false` for STARTTLS (default) |
 | `notifications.smtp.user` / `pass` | SMTP credentials (config file is `chmod 600`) |
 | `notifications.smtp.from` / `to` | sender / recipient addresses |
+| `notifications.healthcheckUrl` | dead-man's switch endpoint (independent of onSuccess/onFailure) |
 | `logging.dir` | where to write per-run logs (CLI mode) |
 
 ## CLI flags (`aegis.mjs` / `backup.mjs`)
@@ -406,7 +439,8 @@ See [`config.example.json`](./config.example.json). Notable fields:
 -n, --dry-run           Build locally but skip remote upload and prune
     --skip-upload       Build locally, skip upload
     --skip-prune        Skip the remote prune step
-    --only <stages>     Comma list: pm2,sqlite,postgres,nginx,extras
+    --skip-hooks        Skip configured pre/post hooks
+    --only <stages>     Comma list: pm2,sqlite,postgres,mysql,redis,mongodb,nginx,extras,aegis
     --setup             Run first-time setup wizard
     --setup-force       Overwrite existing config
     --headless          (TUI internal) skip progress events
@@ -437,6 +471,10 @@ See [`config.example.json`](./config.example.json). Notable fields:
 - **A specific SQLite file fails** — files matching `*.db` that aren't actually SQLite are auto-skipped with a warning. Check the manifest if you suspect a real DB is being missed.
 - **TUI looks broken** — make sure your `TERM` is `xterm-256color` or similar. Try `unset TERM` then run again.
 - **Setup wizard gets confused when piped** — readline needs real-time input. Run interactively in a terminal, not via `echo "..." | ...`. For automation, copy `config.example.json` to `config.json` and edit it directly.
+
+## See also
+
+- [Migrating from Borg / restic / rsnapshot / duplicity](migrating-from.md) — comparison and migration steps.
 
 ## License
 

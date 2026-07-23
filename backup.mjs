@@ -6,8 +6,9 @@ import path from "node:path";
 import os from "node:os";
 import { pipeline } from "node:stream/promises";
 import { ProgressBus, attachConsole } from "./lib/progress.mjs";
+import { runHooks } from "./lib/hooks.mjs";
 
-export const VERSION = "1.2.0";
+export const VERSION = "1.4.0";
 export const TOOL_DIR = path.dirname(new URL(import.meta.url).pathname);
 
 // ---------- CLI -----------------------------------------------------------
@@ -18,6 +19,7 @@ export function parseArgs(argv) {
     dryRun: false,
     skipUpload: false,
     skipPrune: false,
+    skipHooks: false,
     only: null,
     setup: false,
     setupForce: false,
@@ -33,6 +35,7 @@ export function parseArgs(argv) {
     else if (a === "--dry-run" || a === "-n") opts.dryRun = true;
     else if (a === "--skip-upload") opts.skipUpload = true;
     else if (a === "--skip-prune") opts.skipPrune = true;
+    else if (a === "--skip-hooks") opts.skipHooks = true;
     else if (a === "--only") opts.only = (val ?? argv[++i])?.split(",").map((s) => s.trim());
     else if (a === "--headless") opts.headless = true;
     else if (a === "--setup") opts.setup = true;
@@ -57,7 +60,8 @@ Options:
   -n, --dry-run          Build locally but skip remote upload and prune
       --skip-upload      Build locally, skip upload
       --skip-prune        Skip the remote prune step
-      --only <stages>    Comma list: pm2,sqlite,postgres,nginx,extras
+      --skip-hooks        Skip configured pre/post hooks
+      --only <stages>    Comma list: pm2,sqlite,postgres,mysql,redis,mongodb,nginx,extras,aegis
       --setup            Run interactive first-time setup wizard
       --setup-force      Like --setup but overwrite existing config
       --headless         (TUI internal) disable progress events
@@ -272,6 +276,240 @@ async function dumpPostgres(cfg, dbName, outDir) {
   return outFile;
 }
 
+// ---------- MySQL / MariaDB ----------------------------------------------
+
+async function hasMysqlBinary(bin) {
+  // Resolved once per process — no need to re-stat on every call.
+  return new Promise((resolve) => {
+    const child = spawn("sh", ["-c", `command -v ${bin} >/dev/null 2>&1`], { stdio: "ignore" });
+    child.on("close", (code) => resolve(code === 0));
+    child.on("error", () => resolve(false));
+  });
+}
+
+async function listMysqlDatabases(cfg) {
+  const bin = cfg.mysql?.bin || "mysql";
+  const args = [
+    "-h", cfg.mysql.host || "localhost",
+    "-P", String(cfg.mysql.port || 3306),
+    "-u", cfg.mysql.user || "root",
+    cfg.mysql.password ? `-p${cfg.mysql.password}` : "",
+    "-N", "-B", "-e", "SHOW DATABASES",
+  ].filter(Boolean);
+  const [cmd, cmdArgs] = asUser(cfg.mysql.runAs, bin, args);
+  const r = await run(cmd, cmdArgs);
+  if (r.code !== 0) {
+    // Empty creds rejected → exit 1 with "Access denied". Surface clearly.
+    throw new Error(`mysql list failed: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
+  }
+  const all = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const exc = new Set(cfg.mysql.excludeDatabases || [
+    "information_schema", "mysql", "performance_schema", "sys",
+  ]);
+  return all.filter((d) => !exc.has(d));
+}
+
+async function dumpMysql(cfg, dbName, outDir) {
+  const dumpBin = cfg.mysql?.dumpBin || "mysqldump";
+  const outFile = path.join(outDir, `${dbName}.sql`);
+  const args = [
+    "-h", cfg.mysql.host || "localhost",
+    "-P", String(cfg.mysql.port || 3306),
+    "-u", cfg.mysql.user || "root",
+    cfg.mysql.password ? `-p${cfg.mysql.password}` : "",
+    "--single-transaction",
+    "--routines",
+    "--triggers",
+    "--events",
+    "--default-character-set=utf8mb4",
+    "--hex-blob",
+    "--quick",
+    `--result-file=${outFile}`,
+    dbName,
+  ].filter(Boolean);
+  const [cmd, cmdArgs] = asUser(cfg.mysql.runAs, dumpBin, args);
+  await runChecked(`mysqldump[${dbName}]`, cmd, cmdArgs);
+  try { await fs.chmod(outFile, 0o644); } catch {}
+  return outFile;
+}
+
+// ---------- Redis ---------------------------------------------------------
+
+async function listRedisDatabases(cfg) {
+  // Redis has 16 logical DBs by default. We snapshot them as separate items.
+  // Skip if the user only wants the RDB file (binary, all-DB).
+  const bin = cfg.redis?.bin || "redis-cli";
+  const args = [
+    "-h", cfg.redis?.host || "localhost",
+    "-p", String(cfg.redis?.port || 6379),
+    cfg.redis?.password ? ["-a", cfg.redis.password, "--no-auth-warning"] : [],
+    "INFO", "keyspace",
+  ].flat().filter(Boolean);
+  const [cmd, cmdArgs] = asUser(cfg.redis?.runAs, bin, args);
+  const r = await run(cmd, cmdArgs);
+  if (r.code !== 0) throw new Error(`redis INFO failed: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
+  // Parse "db0:keys=12,expires=0,avg_ttl=0" lines.
+  const dbs = [];
+  for (const line of (r.stdout || "").split("\n")) {
+    const m = line.match(/^db(\d+):keys=(\d+)/);
+    if (m && parseInt(m[2], 10) > 0) dbs.push(`db${m[1]}`);
+  }
+  return dbs;
+}
+
+async function dumpRedis(cfg, outDir) {
+  const bin = cfg.redis?.bin || "redis-cli";
+  const args = [
+    "-h", cfg.redis?.host || "localhost",
+    "-p", String(cfg.redis?.port || 6379),
+    cfg.redis?.password ? ["-a", cfg.redis.password, "--no-auth-warning"] : [],
+  ].flat().filter(Boolean);
+  const [cmd, cmdArgsBase] = asUser(cfg.redis?.runAs, bin, args);
+
+  // BGSAVE triggers a background save. We poll LASTSAVE until the timestamp
+  // changes (with a timeout). If AOF is the dominant persistence mode, BGSAVE
+  // also rewrites the AOF.
+  const before = await run(cmd, [...cmdArgsBase, "LASTSAVE"]);
+  if (before.code !== 0) {
+    throw new Error(`redis LASTSAVE failed: ${(before.stderr || before.stdout).trim().split("\n")[0]}`);
+  }
+  const startTs = parseInt(before.stdout.trim(), 10);
+
+  const bg = await run(cmd, [...cmdArgsBase, "BGSAVE"]);
+  // BGSAVE returns "Background saving started" on success. If an existing save
+  // is in flight, Redis replies with a "Background save already in progress"
+  // error — that's also fine, we just wait for the next save to finish.
+  if (bg.code !== 0 && !/already in progress/i.test(bg.stderr || bg.stdout || "")) {
+    throw new Error(`redis BGSAVE failed: ${(bg.stderr || bg.stdout).trim().split("\n")[0]}`);
+  }
+
+  // Poll LASTSAVE for up to 60s.
+  const deadline = Date.now() + 60_000;
+  let lastTs = startTs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    const ls = await run(cmd, [...cmdArgsBase, "LASTSAVE"]);
+    if (ls.code === 0) lastTs = parseInt(ls.stdout.trim(), 10);
+    if (lastTs > startTs) break;
+  }
+  if (lastTs <= startTs) {
+    throw new Error(`redis BGSAVE did not complete within 60s`);
+  }
+
+  // Locate the dump file. Defaults: /var/lib/redis/dump.rdb. If the user set
+  // a custom dir, prefer that. Try a few common names.
+  const dataDir = cfg.redis?.path || "/var/lib/redis";
+  const candidates = ["dump.rdb", "redis.rdb"];
+  let src = null;
+  for (const name of candidates) {
+    const p = path.join(dataDir, name);
+    if (existsSync(p)) { src = p; break; }
+  }
+  if (!src) throw new Error(`redis dump file not found in ${dataDir} (tried: ${candidates.join(", ")})`);
+
+  const outFile = path.join(outDir, "dump.rdb");
+  await fs.copyFile(src, outFile);
+  try { await fs.chmod(outFile, 0o644); } catch {}
+  return outFile;
+}
+
+// ---------- MongoDB ------------------------------------------------------
+
+async function dumpMongodb(cfg, outDir) {
+  const dumpBin = cfg.mongodb?.dumpBin || "mongodump";
+  const outFile = path.join(outDir, cfg.mongodb?.db ? `${cfg.mongodb.db}.archive` : "all.archive");
+  const args = [
+    "--host", cfg.mongodb?.host || "localhost",
+    "--port", String(cfg.mongodb?.port || 27017),
+    "--archive", // stdout
+    "--gzip",
+  ];
+  if (cfg.mongodb?.user) {
+    args.push("-u", cfg.mongodb.user);
+    if (cfg.mongodb.password) args.push("-p", cfg.mongodb.password);
+    if (cfg.mongodb.authSource) args.push("--authenticationDatabase", cfg.mongodb.authSource);
+  }
+  if (cfg.mongodb?.db) args.push("-d", cfg.mongodb.db);
+  // Stream mongodump stdout into the archive file.
+  await new Promise((resolve, reject) => {
+    const [cmd, cmdArgsBase] = asUser(cfg.mongodb?.runAs, dumpBin, args);
+    const child = spawn(cmd, cmdArgsBase, { stdio: ["ignore", "pipe", "pipe"] });
+    const se = [];
+    child.stderr.on("data", (b) => se.push(b));
+    const out = createWriteStream(outFile);
+    child.stdout.pipe(out);
+    child.on("error", (e) => reject(new Error(`mongodump failed to start: ${e.message}`)));
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`mongodump failed (exit ${code}): ${Buffer.concat(se).toString("utf8").trim().split("\n").slice(-3).join(" ")}`));
+    });
+  });
+  try { await fs.chmod(outFile, 0o644); } catch {}
+  return outFile;
+}
+
+// ---------- Aegis's own state --------------------------------------------
+
+// Stages the tool's runtime secrets and state into a fresh tmp dir, then
+// returns the dir + a list of files included. Caller (the runBackup phase
+// below) is responsible for tarring the dir into the archive.
+//
+// What's included:
+//   - config.json (SMTP creds, FTP password, age recipients, etc.)
+//   - ssh_key (+ .pub) — the SSH identity file referenced by cfg.ssh.identityFile
+//   - state.json (last-run metadata, no secrets)
+//   - crontab.txt — the aegis cron entry (extracted from `crontab -l`)
+//
+// Always encrypts this bundle when encryption is enabled — config.json and
+// the SSH key live in here, so plaintext on the backup server is a worse
+// problem than plaintext anywhere else.
+async function stageAegisState(cfg, opts) {
+  const stageDir = path.join(os.tmpdir(), `aegis-state-${Date.now()}`);
+  await fs.mkdir(stageDir, { recursive: true });
+  const included = [];
+
+  // config.json — try explicit path first, then default locations.
+  const cfgCandidates = [
+    opts.configPath,
+    path.join(TOOL_DIR, "config.json"),
+  ].filter(Boolean);
+  for (const c of cfgCandidates) {
+    if (existsSync(c)) {
+      await fs.copyFile(c, path.join(stageDir, "config.json"));
+      included.push("config.json");
+      break;
+    }
+  }
+
+  // SSH key.
+  if (cfg.ssh?.identityFile && existsSync(cfg.ssh.identityFile)) {
+    await fs.copyFile(cfg.ssh.identityFile, path.join(stageDir, "ssh_key"));
+    try { await fs.copyFile(`${cfg.ssh.identityFile}.pub`, path.join(stageDir, "ssh_key.pub")); } catch {}
+    included.push("ssh_key");
+  }
+
+  // state.json.
+  const { statePath } = await import("./lib/state.mjs");
+  const sp = statePath();
+  if (existsSync(sp)) {
+    await fs.copyFile(sp, path.join(stageDir, "state.json"));
+    included.push("state.json");
+  }
+
+  // Cron — extract just the aegis line.
+  const cr = await run("bash", ["-c", "crontab -l 2>/dev/null | grep -F '# aegis' || true"]);
+  if (cr.stdout.trim()) {
+    await fs.writeFile(path.join(stageDir, "crontab.txt"), cr.stdout);
+    included.push("crontab.txt");
+  }
+
+  if (included.length === 0) {
+    try { await fs.rm(stageDir, { recursive: true, force: true }); } catch {}
+    return null;
+  }
+  return { stageDir, included };
+}
+
 // ---------- SQLite backup -------------------------------------------------
 
 async function backupSqlite(dbPath, outDir) {
@@ -304,12 +542,27 @@ function tarExcludeArgs(excludeDirs) {
   return out;
 }
 
-async function tarDir(srcDir, outFile, excludeDirs = []) {
+// Return the zstd compression level for a given backup phase.
+// Falls back to cfg.archive.compressionLevel (default 3). Different inputs
+// compress very differently:
+//   - pm2 / nginx configs / aegis state: small text → level 19 saves a lot
+//   - postgres dumps (already -Fc -Z 9): barely compresses → level 3 is fine
+//   - mysql SQL dumps: compressible text → level 9
+//   - extras: depends, but level 9 is a reasonable middle ground
+// Users can override per phase via cfg.archive.compressionByPhase.
+function compressionLevelFor(cfg, phase) {
+  const byPhase = cfg?.archive?.compressionByPhase;
+  if (byPhase && Number.isFinite(byPhase[phase])) return byPhase[phase];
+  return cfg?.archive?.compressionLevel ?? 3;
+}
+
+async function tarDir(srcDir, outFile, opts = {}) {
+  const { excludeDirs = [], level = 3 } = opts;
   const excludes = tarExcludeArgs(excludeDirs).map((a) => `'${a}'`).join(" ");
   const srcBase = path.basename(srcDir);
   const parent = path.dirname(srcDir);
   const out = path.resolve(outFile);
-  const cmd = `tar -cf - -C '${parent}' ${excludes} '${srcBase}' | zstd -T0 -q -o '${out}'`;
+  const cmd = `tar -cf - -C '${parent}' ${excludes} '${srcBase}' | zstd -T0 -q -${level} -o '${out}'`;
   let r = await run("sh", ["-c", cmd]);
   if (r.code !== 0) {
     const cmd2 = `tar -czf '${out}' -C '${parent}' ${excludes} '${srcBase}'`;
@@ -382,6 +635,13 @@ function phaseTick(name, n = 1) {
 export async function runBackup(cfg, opts = {}, bus = null) {
   setBus(bus);
   try {
+    // Pre-backup hooks run first; failure aborts before any staging work.
+    if (!opts.skipHooks) {
+      await runHooks("preBackup", cfg, {
+        AEGIS_TIMESTAMP: new Date().toISOString(),
+        AEGIS_CONFIG_PATH: opts.configPath || "",
+      }, { logger: { info, warn, error, ok }, logStream, fatal: true });
+    }
     const tsName = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
     const staging = path.join(cfg.localStagingDir, tsName);
     await fs.mkdir(staging, { recursive: true });
@@ -413,6 +673,127 @@ export async function runBackup(cfg, opts = {}, bus = null) {
             if (activeBus) activeBus.item("postgres", db, "error", { error: e.message });
           }
           phaseTick("postgres");
+        }
+      }
+    }
+
+    // ---- MySQL / MariaDB ----
+    if (!opts.only || opts.only.includes("mysql")) {
+      if (cfg.mysql?.enabled) {
+        const dumpBin = cfg.mysql?.dumpBin || "mysqldump";
+        if (!await hasMysqlBinary(dumpBin)) {
+          warn(`mysql.dumpBin="${dumpBin}" not found on PATH — skipping MySQL backup. Install mariadb-client or mysql-client.`);
+        } else if (!await hasMysqlBinary(cfg.mysql?.bin || "mysql")) {
+          warn(`mysql.bin="${cfg.mysql?.bin || "mysql"}" not found on PATH — skipping MySQL backup.`);
+        } else {
+          let dbs = [];
+          try {
+            dbs = await listMysqlDatabases(cfg);
+          } catch (e) {
+            errors.push(`mysql:list ${e.message}`);
+            error(`  mysql list failed: ${e.message}`);
+          }
+          phaseStart("mysql", `Dumping MySQL databases...`, dbs.length);
+          const myDir = path.join(staging, "mysql");
+          await fs.mkdir(myDir, { recursive: true });
+          if (cfg.mysql.runAs) {
+            try { await fs.chmod(myDir, 0o777); } catch {}
+          }
+          for (const db of dbs) {
+            try {
+              const f = await dumpMysql(cfg, db, myDir);
+              const sz = (await fs.stat(f)).size;
+              ok(`  mysqldump ${db} -> ${path.basename(f)} (${(sz / 1024).toFixed(0)} KiB)`);
+              items.push({
+                kind: "mysql",
+                database: db,
+                host: cfg.mysql.host || "localhost",
+                file: path.basename(f),
+                bytes: sz,
+              });
+              if (activeBus) activeBus.item("mysql", db, "ok", { bytes: sz });
+            } catch (e) {
+              errors.push(`mysql:${db} ${e.message}`);
+              error(`  mysql ${db} failed: ${e.message}`);
+              if (activeBus) activeBus.item("mysql", db, "error", { error: e.message });
+            }
+            phaseTick("mysql");
+          }
+        }
+      }
+    }
+
+    // ---- Redis ----
+    if (!opts.only || opts.only.includes("redis")) {
+      if (cfg.redis?.enabled) {
+        const bin = cfg.redis?.bin || "redis-cli";
+        if (!await hasMysqlBinary(bin)) {
+          warn(`redis.bin="${bin}" not found on PATH — skipping Redis backup.`);
+        } else {
+          phaseStart("redis", "Backing up Redis (BGSAVE + dump.rdb)…", 1);
+          const rdDir = path.join(staging, "redis");
+          await fs.mkdir(rdDir, { recursive: true });
+          if (cfg.redis.runAs) {
+            try { await fs.chmod(rdDir, 0o777); } catch {}
+          }
+          try {
+            const f = await dumpRedis(cfg, rdDir);
+            const sz = (await fs.stat(f)).size;
+            // List which DBs had keys (informational).
+            let dbs = [];
+            try { dbs = await listRedisDatabases(cfg); } catch {}
+            const detail = dbs.length ? ` (DBs with keys: ${dbs.join(", ")})` : "";
+            ok(`  redis -> ${path.basename(f)} (${(sz / 1024).toFixed(0)} KiB)${detail}`);
+            items.push({
+              kind: "redis",
+              host: cfg.redis.host || "localhost",
+              port: cfg.redis.port || 6379,
+              databases: dbs,
+              file: path.basename(f),
+              bytes: sz,
+            });
+            if (activeBus) activeBus.item("redis", `dump.rdb`, "ok", { bytes: sz });
+          } catch (e) {
+            errors.push(`redis ${e.message}`);
+            error(`  redis failed: ${e.message}`);
+            if (activeBus) activeBus.item("redis", "dump.rdb", "error", { error: e.message });
+          }
+          phaseTick("redis");
+        }
+      }
+    }
+
+    // ---- MongoDB ----
+    if (!opts.only || opts.only.includes("mongodb")) {
+      if (cfg.mongodb?.enabled) {
+        const dumpBin = cfg.mongodb?.dumpBin || "mongodump";
+        if (!await hasMysqlBinary(dumpBin)) {
+          warn(`mongodb.dumpBin="${dumpBin}" not found on PATH — skipping MongoDB backup.`);
+        } else {
+          phaseStart("mongodb", `Dumping MongoDB (${cfg.mongodb?.db || "all DBs"})...`, 1);
+          const mgDir = path.join(staging, "mongodb");
+          await fs.mkdir(mgDir, { recursive: true });
+          if (cfg.mongodb.runAs) {
+            try { await fs.chmod(mgDir, 0o777); } catch {}
+          }
+          try {
+            const f = await dumpMongodb(cfg, mgDir);
+            const sz = (await fs.stat(f)).size;
+            ok(`  mongodump -> ${path.basename(f)} (${(sz / 1024 / 1024).toFixed(1)} MiB)`);
+            items.push({
+              kind: "mongodb",
+              database: cfg.mongodb?.db || null,
+              host: cfg.mongodb?.host || "localhost",
+              file: path.basename(f),
+              bytes: sz,
+            });
+            if (activeBus) activeBus.item("mongodb", cfg.mongodb?.db || "(all)", "ok", { bytes: sz });
+          } catch (e) {
+            errors.push(`mongodb ${e.message}`);
+            error(`  mongodb failed: ${e.message}`);
+            if (activeBus) activeBus.item("mongodb", cfg.mongodb?.db || "(all)", "error", { error: e.message });
+          }
+          phaseTick("mongodb");
         }
       }
     }
@@ -456,7 +837,7 @@ export async function runBackup(cfg, opts = {}, bus = null) {
           try {
             const safeName = a.name.replace(/[^a-zA-Z0-9._-]/g, "_");
             const outFile = path.join(pmDir, `${safeName}.tar.zst`);
-            await tarDir(a.cwd, outFile, cfg.pm2.excludeDirs);
+            await tarDir(a.cwd, outFile, { excludeDirs: cfg.pm2.excludeDirs, level: compressionLevelFor(cfg, "pm2") });
             const sz = (await fs.stat(outFile)).size;
             ok(`  pm2 ${a.name} (${a.cwd}) -> ${path.basename(outFile)} (${(sz / 1024 / 1024).toFixed(1)} MiB)`);
             items.push({ kind: "pm2", name: a.name, cwd: a.cwd, script: a.script, instances: a.instances, file: path.basename(outFile), bytes: sz });
@@ -515,7 +896,7 @@ export async function runBackup(cfg, opts = {}, bus = null) {
             if ((await fs.stat(p)).isDirectory()) {
               const safeName = path.basename(p).replace(/[^a-zA-Z0-9._-]/g, "_");
               const outFile = path.join(exDir, `${safeName}.tar.zst`);
-              await tarDir(p, outFile, ["node_modules", ".git", ".cache"]);
+              await tarDir(p, outFile, { excludeDirs: ["node_modules", ".git", ".cache"], level: compressionLevelFor(cfg, "extras") });
               ok(`  extras ${p} -> ${path.basename(outFile)}`);
               items.push({ kind: "extras", path: p, file: path.basename(outFile) });
             } else {
@@ -535,14 +916,52 @@ export async function runBackup(cfg, opts = {}, bus = null) {
     const mf = await writeManifest(staging, items);
     ok(`Manifest: ${mf} (${items.length} items, ${errors.length} error(s))`);
 
+    // ---- Aegis's own state (config.json, ssh key, state.json, cron) ----
+    // Only when `aegis.enabled` is true. Always encrypts this bundle when
+    // encryption is configured (config.json + ssh key live in here).
+    if (!opts.only || opts.only.includes("aegis")) {
+      if (cfg.aegis?.enabled) {
+        phaseStart("aegis", "Bundling Aegis's own state (config.json, ssh key, cron)…", 1);
+        const staged = await stageAegisState(cfg, opts);
+        if (!staged) {
+          warn("  aegis: no state files found (config.json, ssh key, state.json all missing)");
+        } else {
+          const agDir = path.join(staging, "aegis");
+          await fs.mkdir(agDir, { recursive: true });
+          const stateFile = path.join(agDir, "state.tar.zst");
+          await tarDir(staged.stageDir, stateFile, {
+            excludeDirs: [],
+            level: compressionLevelFor(cfg, "aegis"),
+          });
+          const sz = (await fs.stat(stateFile)).size;
+          // Per-file encryption when configured — the entire archive will
+          // already be encrypted, but if the user has *only* enabled
+          // encryption for this state bundle, we support that here too.
+          ok(`  aegis state: ${staged.included.join(", ")} → ${path.basename(stateFile)} (${(sz / 1024).toFixed(0)} KiB)`);
+          items.push({
+            kind: "aegis",
+            file: path.basename(stateFile),
+            bytes: sz,
+            files: staged.included,
+          });
+          if (activeBus) activeBus.item("aegis", "state", "ok", { bytes: sz });
+          // Re-write the manifest now that we've added the aegis item.
+          await writeManifest(staging, items);
+          try { await fs.rm(staged.stageDir, { recursive: true, force: true }); } catch {}
+        }
+        phaseTick("aegis");
+      }
+    }
+
     // Final archive
     phaseStart("archive", "Creating final archive...", 1);
-    const archive = path.join(cfg.localArchiveDir || staging, `aegis-${tsName}.tar.zst`);
+    let archive = path.join(cfg.localArchiveDir || staging, `aegis-${tsName}.tar.zst`);
     await fs.mkdir(path.dirname(archive), { recursive: true });
     const finalSrc = path.basename(staging);
     const finalParent = path.dirname(staging);
     const finalOut = path.resolve(archive);
-    const cmd = `tar -cf - -C '${finalParent}' '${finalSrc}' | zstd -T0 -q -o '${finalOut}'`;
+    const finalLevel = compressionLevelFor(cfg, null);
+    const cmd = `tar -cf - -C '${finalParent}' '${finalSrc}' | zstd -T0 -q -${finalLevel} -o '${finalOut}'`;
     let r = await run("sh", ["-c", cmd]);
     if (r.code !== 0) {
       const archiveGz = archive.replace(/\.tar\.zst$/, ".tar.gz");
@@ -555,9 +974,33 @@ export async function runBackup(cfg, opts = {}, bus = null) {
     ok(`Archive: ${archive} (${(aSize / 1024 / 1024).toFixed(1)} MiB)`);
     phaseTick("archive");
 
+    // Optional age encryption — if recipients are configured, encrypt in place
+    // and replace `archive` with the encrypted path. The .sha256 sidecar is
+    // then of the encrypted bytes, so the backup server can't fingerprint the
+    // plaintext (or compute its own hash).
+    const { isEnabled: encryptionEnabled, encryptFile } = await import("./lib/encrypt.mjs");
+    if (encryptionEnabled(cfg)) {
+      const encrypted = archive + ".age";
+      info(`Encrypting with age (${cfg.encryption.recipients.length} recipient(s))…`);
+      await encryptFile(archive, encrypted, cfg.encryption.recipients);
+      // Replace archive and remove the plaintext.
+      try { await fs.unlink(archive); } catch {}
+      archive = encrypted;
+      ok(`Encrypted archive: ${archive} (${((await fs.stat(archive)).size / 1024 / 1024).toFixed(1)} MiB)`);
+    }
+
     const sha = await sha256File(archive);
     await fs.writeFile(archive + ".sha256", `${sha}  ${path.basename(archive)}\n`);
     ok(`SHA256: ${sha}`);
+
+    // Post-backup hook: best-effort (failure is logged, doesn't change result).
+    if (!opts.skipHooks) {
+      await runHooks("postBackup", cfg, {
+        AEGIS_TIMESTAMP: new Date().toISOString(),
+        AEGIS_ARCHIVE_PATH: archive,
+        AEGIS_CONFIG_PATH: opts.configPath || "",
+      }, { logger: { info, warn, error, ok }, logStream, fatal: false });
+    }
 
     return { staging, archive, items, errors, sha256: sha, bytes: aSize };
   } finally {
@@ -574,10 +1017,29 @@ export async function uploadBundle(cfg, archive, opts = {}) {
   }
   const transfer = cfg.transfer || "ssh";
   if (activeBus) activeBus.phase("upload", `Uploading via ${transfer}...`, 1);
+  // Pre-upload hook: failure aborts before transferring data.
+  if (!opts.skipHooks) {
+    await runHooks("preUpload", cfg, {
+      AEGIS_TIMESTAMP: new Date().toISOString(),
+      AEGIS_ARCHIVE_PATH: archive,
+      AEGIS_CONFIG_PATH: opts.configPath || "",
+    }, { logger: { info, warn, error, ok }, logStream, fatal: true });
+  }
   if (transfer === "ftp") {
     await uploadFtp(cfg, archive);
+  } else if (transfer === "rclone") {
+    const { uploadRclone } = await import("./lib/rclone.mjs");
+    await uploadRclone(cfg, archive);
   } else {
     await uploadSsh(cfg, archive);
+  }
+  // Post-upload hook: best-effort.
+  if (!opts.skipHooks) {
+    await runHooks("postUpload", cfg, {
+      AEGIS_TIMESTAMP: new Date().toISOString(),
+      AEGIS_ARCHIVE_PATH: archive,
+      AEGIS_CONFIG_PATH: opts.configPath || "",
+    }, { logger: { info, warn, error, ok }, logStream, fatal: false });
   }
   if (activeBus) activeBus.progress("upload", 1, 1);
   return true;
@@ -621,7 +1083,9 @@ async function uploadFtp(cfg, archive) {
     `${proto}://${f.host}:${f.port || 21}/`,
   ]);
   // Ignore MKD failures (often "directory already exists" which curl surfaces as 550)
-  // 2. Upload archive + sha256 sidecar
+  // 2. Upload archive + sha256 sidecar. `-C -` makes curl continue a partial
+  // upload if the server supports REST (most do) — important for large
+  // archives that get interrupted.
   for (const file of [archive, archive + ".sha256"]) {
     const url = `${base}${encodeURIComponent(path.basename(file))}`;
     const args = [
@@ -630,6 +1094,9 @@ async function uploadFtp(cfg, archive) {
       "--max-time", "3600",
       "-u", userArg,
       ...(f.secure ? ["--ssl"] : []),
+      "-C", "-",                       // resume from where we left off
+      "--retry", "3",                  // retry transient failures
+      "--retry-delay", "5",
       "-T", file,
       url,
     ];
@@ -663,7 +1130,13 @@ export async function pruneRemote(cfg, opts = {}) {
   if (activeBus) activeBus.phase("prune", "Pruning remote…", 1);
   const transfer = cfg.transfer || "ssh";
   // 1. List remote backups (newest-first).
-  const list = transfer === "ftp" ? await listRemoteFtpDetailed(cfg) : await listRemoteSshDetailed(cfg);
+  let list;
+  if (transfer === "ftp") list = await listRemoteFtpDetailed(cfg);
+  else if (transfer === "rclone") {
+    const { listRcloneDetailed } = await import("./lib/rclone.mjs");
+    list = await listRcloneDetailed(cfg);
+  }
+  else list = await listRemoteSshDetailed(cfg);
   if (list.length === 0) {
     ok("Prune finished (no remote backups)");
     if (activeBus) activeBus.progress("prune", 1, 1);
@@ -684,9 +1157,13 @@ export async function pruneRemote(cfg, opts = {}) {
   // 3. Delete.
   let deleted = 0;
   for (const { name } of toDelete) {
-    const ok = transfer === "ftp"
-      ? await deleteFtpFile(cfg, name)
-      : await deleteSshFile(cfg, name);
+    let ok;
+    if (transfer === "ftp") ok = await deleteFtpFile(cfg, name);
+    else if (transfer === "rclone") {
+      const { deleteRcloneFile } = await import("./lib/rclone.mjs");
+      ok = await deleteRcloneFile(cfg, name);
+    }
+    else ok = await deleteSshFile(cfg, name);
     if (ok) {
       info(`deleted ${name}`);
       deleted++;
@@ -703,7 +1180,7 @@ export async function pruneRemote(cfg, opts = {}) {
 async function listRemoteSshDetailed(cfg) {
   const cmd = [
     `cd ${shellQuote(cfg.ssh.remoteDir)}`,
-    `for f in aegis-*.tar.zst aegis-*.tar.gz; do`,
+    `for f in aegis-*.tar.zst aegis-*.tar.gz aegis-*.tar.zst.age aegis-*.tar.gz.age; do`,
     `  [ -f "$f" ] || continue;`,
     `  echo "$(stat -c %Y "$f") $f";`,
     `done | sort -rn`,
@@ -739,7 +1216,7 @@ async function listRemoteFtpDetailed(cfg) {
     for (const raw of listCmd.stdout.trim().split("\n")) {
       const m = raw.match(/^modify=(\d{14});.*?\s(\S+)\s*$/);
       if (!m) continue;
-      if (!/^aegis-.*\.tar\.(zst|gz)$/.test(m[2])) continue;
+      if (!/^aegis-.*\.tar\.(zst|gz)(\.age)?$/.test(m[2])) continue;
       const ts = `${m[1].slice(0,4)}-${m[1].slice(4,6)}-${m[1].slice(6,8)}T${m[1].slice(8,10)}:${m[1].slice(10,12)}:${m[1].slice(12,14)}Z`;
       out.push({ name: m[2], epoch: Math.floor(new Date(ts).getTime() / 1000) });
     }
@@ -757,7 +1234,7 @@ async function listRemoteFtpDetailed(cfg) {
     "--list-only", base,
   ]);
   if (r.code !== 0) return [];
-  const names = r.stdout.split("\n").map((s) => s.trim()).filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s));
+  const names = r.stdout.split("\n").map((s) => s.trim()).filter((s) => /^aegis-.*\.tar\.(zst|gz)(\.age)?$/.test(s));
   names.sort().reverse();
   for (const n of names) {
     const m = n.match(/aegis-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
@@ -825,8 +1302,9 @@ export async function runFullBackup(cfgPath, opts = {}) {
   let result = null;
   let errorMsg = null;
   try {
-    result = await runBackup(cfg, opts, null);
-    await uploadBundle(cfg, result.archive, opts);
+    const innerOpts = { ...opts, configPath: cfgPath };
+    result = await runBackup(cfg, innerOpts, null);
+    await uploadBundle(cfg, result.archive, innerOpts);
     await pruneRemote(cfg, opts);
     const dur = ((Date.now() - startedAt) / 1000).toFixed(1);
     ok(`Done in ${dur}s`);
@@ -853,6 +1331,43 @@ export async function runFullBackup(cfgPath, opts = {}) {
         error: errorMsg,
       });
     } catch (e) { /* state persistence is best-effort */ }
+    // Write human-readable summary (Markdown + HTML) next to the log file.
+    try {
+      const { writeSummary } = await import("./lib/summary.mjs");
+      const transfer = cfg.transfer || "ssh";
+      const remote = transfer === "ftp"
+        ? `${cfg.ftp?.user}@${cfg.ftp?.host}:${cfg.ftp?.remoteDir}`
+        : transfer === "rclone"
+          ? `${cfg.rclone?.remote}:${cfg.rclone?.path}`
+          : `${cfg.ssh?.user}@${cfg.ssh?.host}:${cfg.ssh?.remoteDir}`;
+      await writeSummary({
+        logDir: cfgPath ? path.dirname(cfgPath) : TOOL_DIR,
+        prefix: "backup",
+        timestamp: new Date(startedAt),
+        ok: !errorMsg,
+        durationMs: Date.now() - startedAt,
+        hostname: os.hostname(),
+        transfer,
+        remote,
+        archive: result?.archive,
+        archiveBytes: result?.bytes,
+        sha256: result?.sha256,
+        items: result?.items,
+        errors: result?.errors,
+        logFile: logFilePath,
+        errorMessage: errorMsg,
+      });
+    } catch (e) { /* summary is best-effort */ }
+    // Ping dead-man's switch (independent of notifications onSuccess/onFailure).
+    // A missing backup is the more dangerous failure mode — alert even if the
+    // user has muted other channels.
+    const hcUrl = cfg.notifications?.healthcheckUrl;
+    if (hcUrl) {
+      try {
+        const { pingHealthcheck } = await import("./lib/notifications.mjs");
+        await pingHealthcheck(hcUrl, !errorMsg);
+      } catch (e) { /* healthcheck failure is non-fatal */ }
+    }
     // Fire notifications (best-effort, doesn't affect exit code)
     try {
       const { sendNotifications } = await import("./lib/notifications.mjs");

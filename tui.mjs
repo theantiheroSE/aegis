@@ -185,7 +185,7 @@ async function remoteDiskInfoFtp(cfg) {
   if (r.code !== 0) return out;
   const names = r.stdout.split("\n")
     .map((s) => s.trim())
-    .filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s));
+    .filter((s) => /^aegis-.*\.tar\.(zst|gz)(\.age)?$/.test(s));
   out.ok = true;
   out.count = names.length;
   return out;
@@ -381,6 +381,7 @@ class Tui {
       "── Browse ───────────────",
       "  List remote backups",
       "  Restore from backup...",
+      "  Show backup contents (preview)",
       "  Verify backup integrity",
       "  View logs",
       "  Test remote connection",
@@ -732,15 +733,16 @@ class Tui {
       case 1: return this.startBackup({ only: ["postgres", "sqlite"] });
       case 2: return this.showListBackups();
       case 3: return this.showRestorePicker();
-      case 4: return this.showVerifyPicker();
-      case 5: return this.showLogs();
-      case 6: return this.testConnection();
-      case 7: return this.pruneNow();
-      case 8: return this.refreshAll();
-      case 9: return this.installCronMenu();
-      case 10: return this.configureNotifications();
-      case 11: return this.editConfig();
-      case 12: return this.quit();
+      case 4: return this.showBackupContents();
+      case 5: return this.showVerifyPicker();
+      case 6: return this.showLogs();
+      case 7: return this.testConnection();
+      case 8: return this.pruneNow();
+      case 9: return this.refreshAll();
+      case 10: return this.installCronMenu();
+      case 11: return this.configureNotifications();
+      case 12: return this.editConfig();
+      case 13: return this.quit();
     }
   }
 
@@ -1021,6 +1023,38 @@ class Tui {
     });
   }
 
+  // "Show backup contents (preview)" — downloads a chosen archive, runs
+  // `restore.mjs --plan` to read its manifest, and renders the result in
+  // the logView so the user can see what they'd be restoring without
+  // touching anything on disk.
+  async showBackupContents() {
+    if (!this.cfg) return this.toast("Config not loaded");
+    this.toast("Querying remote...");
+    const list = await listRemoteBackups(this.cfg);
+    if (list.length === 0) return this.toast("No remote backups to preview");
+    this.remoteBackups = list;
+    this.listView.setLabel(` Pick a backup to preview (Esc to cancel) `);
+    this.listView.setItems(list.map((n, i) => `${(i + 1).toString().padStart(3)}. ${n}`));
+    this.showView("list");
+    this.listView.once("select", async (_, idx) => {
+      const archive = list[idx];
+      this.toast(`Downloading & previewing ${archive}...`);
+      const r = await shell(process.execPath, [
+        path.join(TOOL_DIR, "restore.mjs"),
+        "--archive", archive,
+        "--config", this.cfgPath,
+        "--plan", "--yes",
+      ]);
+      this.logView.setLabel(` ${archive} — contents preview (↑/↓ to scroll, Esc to back) `);
+      this.logView.setContent(
+        (r.stdout || "(no output)") +
+        (r.code !== 0 ? `\n\n${C.red(`exit ${r.code}`)}\n${r.stderr || ""}` : "")
+      );
+      this.showView("logs");
+      this.refreshAll();
+    });
+  }
+
   async showVerifyPicker() {
     if (!this.cfg) return this.toast("Config not loaded");
     this.toast("Querying remote...");
@@ -1032,11 +1066,34 @@ class Tui {
     this.showView("list");
     this.listView.once("select", (_, idx) => {
       this.showView("menu");
-      this.runVerify(list[idx]);
+      this.pickVerifyMode(list[idx]);
     });
   }
 
-  async runVerify(archiveName) {
+  // After picking an archive, ask what depth of verification to run.
+  async pickVerifyMode(archiveName) {
+    await this.runSubMenu({
+      title: ` Verify ${archiveName} — pick mode `,
+      buildChoices: () => [
+        "  Transport check (sha256 only, fast)",
+        "  Content check (extract + per-component verify, slow)",
+        "  Both (transport then content)",
+      ],
+      handleChoice: async (idx) => {
+        if (idx === 0) {
+          this.runVerify(archiveName, false);
+        } else if (idx === 1) {
+          this.runDeepVerify(archiveName);
+        } else if (idx === 2) {
+          // Run transport first, then deep — chained.
+          this.runVerifyChained(archiveName);
+        }
+        return { exit: true };
+      },
+    });
+  }
+
+  async runVerify(archiveName, showMode = true) {
     this.screen.destroy();
     const child = spawn(process.execPath, [
       path.join(TOOL_DIR, "verify.mjs"),
@@ -1045,10 +1102,66 @@ class Tui {
     ], { stdio: "inherit" });
     child.on("exit", (code) => {
       console.log("");
-      console.log(C.bold(code === 0 ? `✓ Verification PASSED. Press Enter to return to TUI.` : `✗ Verification FAILED (exit ${code}). Press Enter to return to TUI.`));
+      console.log(C.bold(code === 0 ? `✓ Transport verification PASSED. Press Enter to return to TUI.` : `✗ Transport verification FAILED (exit ${code}). Press Enter to return to TUI.`));
       process.stdin.once("data", () => {
         const tui = new Tui();
         tui.menu.focus();
+      });
+    });
+  }
+
+  async runDeepVerify(archiveName) {
+    this.screen.destroy();
+    // --verify --download-only: extract, verify contents, exit before restore.
+    const child = spawn(process.execPath, [
+      path.join(TOOL_DIR, "restore.mjs"),
+      "--archive", archiveName,
+      "--config", this.cfgPath,
+      "--verify", "--download-only",
+      "--yes",
+    ], { stdio: "inherit" });
+    child.on("exit", (code) => {
+      console.log("");
+      console.log(C.bold(code === 0 ? `✓ Content verification PASSED. Press Enter to return to TUI.` : `✗ Content verification FAILED (exit ${code}). Press Enter to return to TUI.`));
+      process.stdin.once("data", () => {
+        const tui = new Tui();
+        tui.menu.focus();
+      });
+    });
+  }
+
+  async runVerifyChained(archiveName) {
+    this.screen.destroy();
+    // Run transport first; only if it passes, run content.
+    const transport = spawn(process.execPath, [
+      path.join(TOOL_DIR, "verify.mjs"),
+      "--archive", archiveName,
+      "--config", this.cfgPath,
+    ], { stdio: "inherit" });
+    transport.on("exit", (code) => {
+      if (code !== 0) {
+        console.log("");
+        console.log(C.red(`✗ Transport check failed (exit ${code}) — skipping content check.`));
+        process.stdin.once("data", () => {
+          const tui = new Tui();
+          tui.menu.focus();
+        });
+        return;
+      }
+      const content = spawn(process.execPath, [
+        path.join(TOOL_DIR, "restore.mjs"),
+        "--archive", archiveName,
+        "--config", this.cfgPath,
+        "--verify", "--download-only",
+        "--yes",
+      ], { stdio: "inherit" });
+      content.on("exit", (code2) => {
+        console.log("");
+        console.log(C.bold(code2 === 0 ? `✓ Full verification PASSED. Press Enter to return to TUI.` : `✗ Content verification FAILED (exit ${code2}). Press Enter to return to TUI.`));
+        process.stdin.once("data", () => {
+          const tui = new Tui();
+          tui.menu.focus();
+        });
       });
     });
   }
@@ -1137,7 +1250,8 @@ class Tui {
       "  Weekly Mon 04:00      — 0 4 * * 1",
       "  Monthly 1st 02:00     — 0 2 1 * *",
       "  Custom — enter expression",
-      "  Uninstall (remove cron job)",
+      "  Add weekly verify cron (Sun 06:00) — independent",
+      "  Uninstall (remove ALL cron jobs)",
       "  Cancel",
     ];
     const exprs = [
@@ -1160,9 +1274,11 @@ class Tui {
       this.showView("menu");
       const cancelIdx = choices.length - 1;
       const uninstallIdx = choices.length - 2;
-      const customIdx = choices.length - 3;
+      const verifyCronIdx = choices.length - 3;
+      const customIdx = choices.length - 4;
       if (idx === cancelIdx) return;
       if (idx === uninstallIdx) return this.runInstallCron(null, true);
+      if (idx === verifyCronIdx) return this.runInstallCronVerify();
       let expr;
       if (idx === customIdx) {
         const ans = await this.prompt(
@@ -1187,6 +1303,20 @@ class Tui {
     else if (expr) args.push(expr);
     const r = await shell("bash", args);
     this.toast(uninstall ? "Cron removed." : (r.code === 0 ? `${C.green("Cron installed:")} ${expr || "default"}` : `${C.red("install failed:")} ${r.stderr}`));
+    await this.refreshCron();
+    this.refreshAll();
+  }
+
+  // Install ONLY the weekly verify cron (does not touch the backup cron).
+  // Lets a user add the safety net without re-running setup.
+  async runInstallCronVerify() {
+    const expr = await this.prompt(
+      "Weekly verify cron expression (M H DoM Mo DoW):",
+      "0 6 * * 0",
+    );
+    if (!expr) return;
+    const r = await shell("bash", [path.join(TOOL_DIR, "install-cron.sh"), "--verify", expr.trim()]);
+    this.toast(r.code === 0 ? `${C.green("Weekly verify cron installed:")} ${expr.trim()}` : `${C.red("install failed:")} ${r.stderr}`);
     await this.refreshCron();
     this.refreshAll();
   }
@@ -1227,13 +1357,18 @@ class Tui {
       title: " Configure notifications (Esc to cancel) ",
       buildChoices: () => {
         const cur = this.cfg.notifications || {};
+        const hc = cur.healthcheckUrl || "";
+        const whSec = cur.webhook?.secret;
         return [
           `Enable failure notifications: ${cur.onFailure !== false ? C.green("yes") : C.gray("no")}`,
           `Enable success notifications: ${cur.onSuccess === true ? C.green("yes") : C.gray("no")}`,
           "  Configure webhook URL",
+          `  Configure webhook signing secret: ${whSec ? C.green("•".repeat(8)) : C.gray("(not set)")}`,
           "  Configure email recipient (to)",
           "  Configure email sender (from)",
           "  Configure SMTP server...",
+          `Healthcheck URL: ${hc ? C.green(hc.length > 40 ? hc.slice(0, 37) + "…" : hc) : C.gray("(not set — dead-man's switch off)")}`,
+          "  Test healthcheck ping now",
           "  Test notifications now",
         ];
       },
@@ -1247,16 +1382,48 @@ class Tui {
           const url = await this.prompt("Webhook URL (e.g. Slack/Discord/ntfy):", cur.webhook?.url || "");
           if (url) cur.webhook = { ...cur.webhook, url };
         } else if (idx === 3) {
+          const secret = await this.prompt(
+            "Webhook signing secret (sent as X-Aegis-Signature: sha256=<hex>; blank to clear):",
+            cur.webhook?.secret || "",
+          );
+          if (secret && secret.trim()) {
+            cur.webhook = { ...cur.webhook, secret: secret.trim() };
+          } else {
+            if (cur.webhook) delete cur.webhook.secret;
+          }
+        } else if (idx === 4) {
           const to = await this.prompt("Email recipient (to):", cur.email?.to || "");
           if (to) cur.email = { ...cur.email, to };
-        } else if (idx === 4) {
+        } else if (idx === 5) {
           const from = await this.prompt("Email sender (from):", cur.email?.from || "Aegis");
           if (from) cur.email = { ...cur.email, from };
-        } else if (idx === 5) {
+        } else if (idx === 6) {
           await this.configureSmtp();
           return { stay: true };
-        } else if (idx === 6) {
+        } else if (idx === 7) {
+          const url = await this.prompt(
+            "Healthchecks.io / Uptime Kuma ping URL (leave blank to clear):",
+            cur.healthcheckUrl || "",
+          );
+          if (url && url.trim()) cur.healthcheckUrl = url.trim();
+          else delete cur.healthcheckUrl;
+        } else if (idx === 8) {
+          if (!cur.healthcheckUrl) {
+            this.toast("No healthcheck URL set — nothing to test");
+            return { stay: true };
+          }
+          this.toast("Sending healthcheck ping…");
+          try {
+            const { pingHealthcheck } = await import("./lib/notifications.mjs");
+            await pingHealthcheck(cur.healthcheckUrl, true);
+            this.toast(C.green("✓ Healthcheck ping sent (success path)"));
+          } catch (e) {
+            this.toast(C.red(`✗ Healthcheck ping failed: ${e.message}`));
+          }
+          return { stay: true };
+        } else if (idx === 9) {
           await this.testNotifications();
+          return { stay: true };
         }
         this.cfg.notifications = cur;
         await fs.writeFile(this.cfgPath, JSON.stringify(this.cfg, null, 2) + "\n", { mode: 0o600 });

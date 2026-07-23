@@ -5,8 +5,8 @@
     "host": "backup.example.com",
     "port": 22,
     "user": "backup",
-    "identityFile": "/root/.ssh/id_ed25519",
-    "remoteDir": "/backups/vps"
+    "identityFile": "/root/.ssh/aegis_ed25519",
+    "remoteDir": "/backups/aegis"
   },
 
   "ftp": {
@@ -14,12 +14,17 @@
     "port": 21,
     "user": "backup",
     "password": "change-me",
-    "remoteDir": "/backups/vps",
+    "remoteDir": "/backups/aegis",
     "secure": false
   },
 
-  "localStagingDir": "/var/backups/vps/staging",
-  "localArchiveDir": "/var/backups/vps/archive",
+  "rclone": {
+    "remote": "mys3",
+    "path": "backups/aegis"
+  },
+
+  "localStagingDir": "/var/backups/aegis/staging",
+  "localArchiveDir": "/var/backups/aegis/archive",
 
   "retention": {
     "daily": 7,
@@ -35,7 +40,8 @@
     "webhook": {
       "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
       "method": "POST",
-      "headers": { "Content-Type": "application/json" }
+      "headers": { "Content-Type": "application/json" },
+      "secret": ""
     },
     "email": {
       "to": "ops@example.com",
@@ -49,7 +55,20 @@
       "pass": "app-password",
       "from": "user@gmail.com",
       "to": "ops@example.com"
-    }
+    },
+    "healthcheckUrl": "https://hc-ping.com/your-uuid-here"
+  },
+
+  "encryption": {
+    "recipients": [],
+    "identityFiles": []
+  },
+
+  "hooks": {
+    "preBackup": [],
+    "postBackup": [],
+    "preUpload": [],
+    "postUpload": []
   },
 
   "postgres": {
@@ -61,6 +80,45 @@
     "bin": "pg_dump",
     "excludeDatabases": ["template0", "template1"],
     "excludeOwners": []
+  },
+
+  "mysql": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "",
+    "runAs": "",
+    "bin": "mysql",
+    "dumpBin": "mysqldump",
+    "excludeDatabases": ["information_schema", "mysql", "performance_schema", "sys"]
+  },
+
+  "redis": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 6379,
+    "password": "",
+    "runAs": "",
+    "bin": "redis-cli",
+    "path": "/var/lib/redis"
+  },
+
+  "mongodb": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 27017,
+    "user": "",
+    "password": "",
+    "authSource": "admin",
+    "db": "",
+    "runAs": "",
+    "dumpBin": "mongodump",
+    "restoreBin": "mongorestore"
+  },
+
+  "aegis": {
+    "enabled": false
   },
 
   "sqlite": {
@@ -111,7 +169,16 @@
 
   "archive": {
     "compression": "zstd",
-    "compressionLevel": 3
+    "compressionLevel": 3,
+    "compressionByPhase": {
+      "pm2": 19,
+      "postgres": 3,
+      "sqlite": 3,
+      "mysql": 9,
+      "nginx": 19,
+      "extras": 9,
+      "aegis": 19
+    }
   },
 
   "logging": {

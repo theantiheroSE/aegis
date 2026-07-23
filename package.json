@@ -1,7 +1,7 @@
 {
   "name": "aegis",
-  "version": "1.2.0",
-  "description": "VPS backup tool with TUI — backs up Postgres, SQLite, PM2 projects, nginx configs over SSH.",
+  "version": "1.4.0",
+  "description": "VPS backup tool with TUI — backs up Postgres, MySQL, Redis, MongoDB, SQLite, PM2 projects, nginx configs over SSH/FTP/S3.",
   "type": "module",
   "main": "aegis.mjs",
   "bin": {

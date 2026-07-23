@@ -89,7 +89,7 @@ async function listRemoteSsh(cfg) {
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ConnectTimeout=15",
     `${cfg.ssh.user}@${cfg.ssh.host}`,
-    `cd ${cfg.ssh.remoteDir} && ls -1t aegis-*.tar.zst aegis-*.tar.gz 2>/dev/null`,
+    `cd ${cfg.ssh.remoteDir} && ls -1t aegis-*.tar.zst aegis-*.tar.gz aegis-*.tar.zst.age aegis-*.tar.gz.age 2>/dev/null | grep -v '\.sha256$'`,
   ]);
   if (r.code !== 0) return [];
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
@@ -109,13 +109,18 @@ async function listRemoteFtp(cfg) {
   if (r.code !== 0) return [];
   return r.stdout.split("\n")
     .map((s) => s.trim())
-    .filter((s) => /^aegis-.*\.tar\.(zst|gz)$/.test(s))
+    .filter((s) => /^aegis-.*\.tar\.(zst|gz)(\.age)?$/.test(s))
     .sort().reverse();
 }
 
 async function listRemote(cfg) {
   const transfer = cfg.transfer || "ssh";
-  return transfer === "ftp" ? listRemoteFtp(cfg) : listRemoteSsh(cfg);
+  if (transfer === "ftp") return listRemoteFtp(cfg);
+  if (transfer === "rclone") {
+    const { listRclone } = await import("./lib/rclone.mjs");
+    return listRclone(cfg);
+  }
+  return listRemoteSsh(cfg);
 }
 
 async function downloadSsh(cfg, name, dest) {
@@ -143,7 +148,12 @@ async function downloadFtp(cfg, name, dest) {
 
 async function download(cfg, name, dest) {
   const transfer = cfg.transfer || "ssh";
-  return transfer === "ftp" ? downloadFtp(cfg, name, dest) : downloadSsh(cfg, name, dest);
+  if (transfer === "ftp") return downloadFtp(cfg, name, dest);
+  if (transfer === "rclone") {
+    const { downloadRclone } = await import("./lib/rclone.mjs");
+    return downloadRclone(cfg, name, dest);
+  }
+  return downloadSsh(cfg, name, dest);
 }
 
 async function verifySha(archivePath) {
